@@ -1,0 +1,91 @@
+MONTE CARLO UPGRADE HANDOFF
+===========================
+
+Bundle intent
+-------------
+This upgrade keeps the v2.41 app architecture intact while replacing Monte Carlo's heaviest path with a leaner path-simulation kernel and a stronger bootstrap/regime framework.
+
+What changed
+------------
+1) New MC path kernel
+   - Added v241_refactor_app/mc_kernel.py.
+   - Monte Carlo no longer rebuilds pandas DataFrames and no longer calls the full reporting-heavy historical engine for every simulated path.
+   - The kernel still honors the same portfolio mechanics:
+     * contributions
+     * withdrawals
+     * dividend taxes / withdrawal taxes
+     * dividend reinvestment
+     * fees
+     * rebalancing methods / bands
+     * trade frictions / crypto multipliers / AUM scaling
+
+2) Better bootstrap choices
+   - Added Bootstrap Method setting:
+     * Block Bootstrap
+     * Stationary Bootstrap
+   - Stationary bootstrap uses geometric block lengths with average block size equal to the user-selected block size.
+
+3) Better regime logic
+   - Replaced hard candidate-cutoff style regime selection with weighted start probabilities.
+   - Regime scores now combine:
+     * block volatility
+     * downside deviation
+     * block cumulative loss
+     * trailing cumulative loss
+     * trailing volatility
+     * worst month in the block
+   - Added Regime Tilt Strength input so the user can control how strongly the simulation favors stress vs calm starts.
+
+4) Adaptive convergence
+   - Added optional Adaptive Convergence Stop.
+   - MC can stop early once:
+     * failure-rate standard error is below target
+     * balance quantiles are no longer drifting materially between checkpoints
+   - Added Target Failure StdErr (%) input.
+
+5) More decision-useful outputs
+   - MC percentiles now include:
+     * Survival Probability (%)
+     * Ruin by Year (%)
+     * Shortfall by Year (%)
+     * Failure by Year (%)
+   - MC summary now includes:
+     * Simulations Completed
+     * Median / percentile ending balances (nominal + real)
+     * Failure / ruin / shortfall rates
+     * Median minimum balance (nominal + real)
+     * Median conditional failure year / depletion year / shortfall year
+     * Survival probability through key years when available
+
+6) Streamlit integration updates
+   - Added MC settings to app.py for the new controls.
+   - Updated MC tab to chart balance bands separately from survival/failure curves.
+   - Updated MC summary display to support USD / % / Years / Count units.
+   - Updated MC signature hashing so caches invalidate correctly when MC method/settings change.
+
+Files changed
+-------------
+- v241_refactor_app/models.py
+- v241_refactor_app/app.py
+- v241_refactor_app/monte_carlo.py
+- v241_refactor_app/mc_kernel.py   (new)
+
+Why this is better
+------------------
+The previous MC design was correctness-first but expensive because each simulation path recreated DataFrames and reran the full historical/reporting engine. The new design keeps the same economic logic while removing the biggest avoidable overhead. It also makes regime handling less brittle and turns convergence from a passive chart into an optional compute-saving control.
+
+Local synthetic benchmark from this environment
+-----------------------------------------------
+Scenario: 5 assets, 25-year horizon, 200 MC simulations, annual rebalance, taxes/fees/costs on.
+
+- Baseline v2.41 MC: ~16.96 seconds
+- Upgraded MC bundle: ~4.33 seconds
+
+That is roughly a 3.9x speedup in this synthetic benchmark while adding richer outputs.
+
+Notes / remaining boundaries
+----------------------------
+- This is still historical-resampling Monte Carlo, not a full forward-looking capital-market-assumption engine.
+- Tail behavior is improved via stationary bootstrap + regime tilting, but this is not a parametric EVT/copula engine.
+- Failure semantics are stronger than simple terminal-balance checks, but taxes are still stylized rather than account/lot aware.
+- The kernel is faster, but the next ceiling beyond this would be array-native trade logic or a numba-friendly path kernel.
