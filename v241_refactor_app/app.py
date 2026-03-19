@@ -79,6 +79,13 @@ def _build_portfolio_inputs(
     monte_carlo_regime_strength: float,
     monte_carlo_adaptive_convergence: bool,
     monte_carlo_target_stderr_pct: float,
+    monte_carlo_forward_mode: str,
+    monte_carlo_return_haircut_pct: float,
+    monte_carlo_return_shift_pct: float,
+    monte_carlo_vol_multiplier: float,
+    monte_carlo_growth_extra_haircut_pct: float,
+    monte_carlo_crypto_extra_haircut_pct: float,
+    monte_carlo_dividend_multiplier: float,
 ) -> PortfolioInputs:
     contribution_end_year = int(contribution_end_year_input) if str(contribution_end_year_input).strip() else None
     return PortfolioInputs(
@@ -114,6 +121,13 @@ def _build_portfolio_inputs(
         monte_carlo_regime_strength=float(monte_carlo_regime_strength),
         monte_carlo_adaptive_convergence=bool(monte_carlo_adaptive_convergence),
         monte_carlo_target_stderr_pct=float(monte_carlo_target_stderr_pct),
+        monte_carlo_forward_mode=monte_carlo_forward_mode,
+        monte_carlo_return_haircut_pct=float(monte_carlo_return_haircut_pct),
+        monte_carlo_return_shift_pct=float(monte_carlo_return_shift_pct),
+        monte_carlo_vol_multiplier=float(monte_carlo_vol_multiplier),
+        monte_carlo_growth_extra_haircut_pct=float(monte_carlo_growth_extra_haircut_pct),
+        monte_carlo_crypto_extra_haircut_pct=float(monte_carlo_crypto_extra_haircut_pct),
+        monte_carlo_dividend_multiplier=float(monte_carlo_dividend_multiplier),
     )
 
 
@@ -158,6 +172,13 @@ def _mc_signature(active_core_signature: str, active_inputs: PortfolioInputs, ye
                 "regime_strength": active_inputs.monte_carlo_regime_strength,
                 "adaptive_convergence": active_inputs.monte_carlo_adaptive_convergence,
                 "target_stderr_pct": active_inputs.monte_carlo_target_stderr_pct,
+                "forward_mode": active_inputs.monte_carlo_forward_mode,
+                "return_haircut_pct": active_inputs.monte_carlo_return_haircut_pct,
+                "return_shift_pct": active_inputs.monte_carlo_return_shift_pct,
+                "vol_multiplier": active_inputs.monte_carlo_vol_multiplier,
+                "growth_extra_haircut_pct": active_inputs.monte_carlo_growth_extra_haircut_pct,
+                "crypto_extra_haircut_pct": active_inputs.monte_carlo_crypto_extra_haircut_pct,
+                "dividend_multiplier": active_inputs.monte_carlo_dividend_multiplier,
             },
         }
     )
@@ -340,6 +361,39 @@ def main() -> None:
         with mc10:
             monte_carlo_target_stderr_pct = float(st.number_input("Target Failure StdErr (%)", min_value=0.05, max_value=5.0, value=float(st.session_state.get("monte_carlo_target_stderr_pct", 0.35)), step=0.05, key="monte_carlo_target_stderr_pct"))
 
+        forward_mode_options = ["Historical Base", "Post-Bull Haircut", "Stagnation & De-Rating", "Custom Forward Stress"]
+        monte_carlo_forward_mode = st.selectbox(
+            "Forward MC Mode",
+            forward_mode_options,
+            index=forward_mode_options.index(st.session_state.get("monte_carlo_forward_mode", "Historical Base")),
+            key="monte_carlo_forward_mode",
+        )
+        if monte_carlo_forward_mode == "Historical Base":
+            st.caption("Uses pure historical/bootstrap Monte Carlo with no forward overlay.")
+        elif monte_carlo_forward_mode == "Post-Bull Haircut":
+            st.caption("Applies a forward-looking haircut to historical drift, modestly higher volatility, and softer dividend assumptions while preserving sampled path structure.")
+        elif monte_carlo_forward_mode == "Stagnation & De-Rating":
+            st.caption("Applies a harder drift reset, higher volatility, and weaker income assumptions to model flat or post-bull regimes.")
+        else:
+            st.caption("Custom forward stress lets you override drift, volatility, and dividend assumptions on top of the historical/bootstrap path engine.")
+
+        custom_forward_mode = monte_carlo_forward_mode == "Custom Forward Stress"
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            monte_carlo_return_haircut_pct = float(st.number_input("Annual Return Haircut (%)", min_value=0.0, max_value=100.0, value=float(st.session_state.get("monte_carlo_return_haircut_pct", 35.0)), step=1.0, key="monte_carlo_return_haircut_pct", disabled=not custom_forward_mode))
+        with fc2:
+            monte_carlo_return_shift_pct = float(st.number_input("Annual Return Shift (%)", min_value=-25.0, max_value=25.0, value=float(st.session_state.get("monte_carlo_return_shift_pct", -2.0)), step=0.5, key="monte_carlo_return_shift_pct", disabled=not custom_forward_mode))
+        with fc3:
+            monte_carlo_vol_multiplier = float(st.number_input("Volatility Multiplier", min_value=0.25, max_value=3.0, value=float(st.session_state.get("monte_carlo_vol_multiplier", 1.15)), step=0.05, key="monte_carlo_vol_multiplier", disabled=not custom_forward_mode))
+
+        fc4, fc5, fc6 = st.columns(3)
+        with fc4:
+            monte_carlo_growth_extra_haircut_pct = float(st.number_input("Aggressive Bucket Extra Haircut (%)", min_value=0.0, max_value=100.0, value=float(st.session_state.get("monte_carlo_growth_extra_haircut_pct", 15.0)), step=1.0, key="monte_carlo_growth_extra_haircut_pct", disabled=not custom_forward_mode))
+        with fc5:
+            monte_carlo_crypto_extra_haircut_pct = float(st.number_input("Crypto Extra Haircut (%)", min_value=0.0, max_value=100.0, value=float(st.session_state.get("monte_carlo_crypto_extra_haircut_pct", 10.0)), step=1.0, key="monte_carlo_crypto_extra_haircut_pct", disabled=not custom_forward_mode))
+        with fc6:
+            monte_carlo_dividend_multiplier = float(st.number_input("Dividend Multiplier", min_value=0.0, max_value=2.0, value=float(st.session_state.get("monte_carlo_dividend_multiplier", 0.85)), step=0.05, key="monte_carlo_dividend_multiplier", disabled=not custom_forward_mode))
+
     assets = collect_assets(num_assets)
     run_clicked = st.button("Run simulation", type="primary")
 
@@ -377,6 +431,13 @@ def main() -> None:
         "monte_carlo_regime_strength": float(monte_carlo_regime_strength),
         "monte_carlo_adaptive_convergence": bool(monte_carlo_adaptive_convergence),
         "monte_carlo_target_stderr_pct": float(monte_carlo_target_stderr_pct),
+        "monte_carlo_forward_mode": monte_carlo_forward_mode,
+        "monte_carlo_return_haircut_pct": float(monte_carlo_return_haircut_pct),
+        "monte_carlo_return_shift_pct": float(monte_carlo_return_shift_pct),
+        "monte_carlo_vol_multiplier": float(monte_carlo_vol_multiplier),
+        "monte_carlo_growth_extra_haircut_pct": float(monte_carlo_growth_extra_haircut_pct),
+        "monte_carlo_crypto_extra_haircut_pct": float(monte_carlo_crypto_extra_haircut_pct),
+        "monte_carlo_dividend_multiplier": float(monte_carlo_dividend_multiplier),
     }
     raw_signature = build_raw_signature(_build_raw_state_payload(assets, widget_payload, tiingo_token))
 
@@ -419,6 +480,13 @@ def main() -> None:
             monte_carlo_regime_strength=monte_carlo_regime_strength,
             monte_carlo_adaptive_convergence=monte_carlo_adaptive_convergence,
             monte_carlo_target_stderr_pct=monte_carlo_target_stderr_pct,
+            monte_carlo_forward_mode=monte_carlo_forward_mode,
+            monte_carlo_return_haircut_pct=monte_carlo_return_haircut_pct,
+            monte_carlo_return_shift_pct=monte_carlo_return_shift_pct,
+            monte_carlo_vol_multiplier=monte_carlo_vol_multiplier,
+            monte_carlo_growth_extra_haircut_pct=monte_carlo_growth_extra_haircut_pct,
+            monte_carlo_crypto_extra_haircut_pct=monte_carlo_crypto_extra_haircut_pct,
+            monte_carlo_dividend_multiplier=monte_carlo_dividend_multiplier,
         )
         current_valid_snapshot = orch.make_run_snapshot(portfolio_inputs, valid_assets, tiingo_token, raw_signature)
         current_core_signature = orch.snapshot_core_signature(current_valid_snapshot)
@@ -670,7 +738,7 @@ def main() -> None:
 
                 if mc_percentiles is not None and mc_summary is not None:
                     st.caption(
-                        f"Bootstrap: {active_inputs.monte_carlo_bootstrap_method}; regime: {active_inputs.monte_carlo_regime_mode}; tilt strength {active_inputs.monte_carlo_regime_strength:.1f}; block size {active_inputs.monte_carlo_block_size_months} months; regime window {active_inputs.monte_carlo_regime_window_months} months; adaptive convergence {'on' if active_inputs.monte_carlo_adaptive_convergence else 'off'} (target stderr {active_inputs.monte_carlo_target_stderr_pct:.2f}%)."
+                        f"Bootstrap: {active_inputs.monte_carlo_bootstrap_method}; regime: {active_inputs.monte_carlo_regime_mode}; tilt strength {active_inputs.monte_carlo_regime_strength:.1f}; block size {active_inputs.monte_carlo_block_size_months} months; regime window {active_inputs.monte_carlo_regime_window_months} months; forward mode: {active_inputs.monte_carlo_forward_mode}; adaptive convergence {'on' if active_inputs.monte_carlo_adaptive_convergence else 'off'} (target stderr {active_inputs.monte_carlo_target_stderr_pct:.2f}%)."
                     )
                     st.subheader("Monte Carlo Probability Bands")
                     balance_cols = [col for col in ["P10", "Median", "P90", "Real P10", "Real Median", "Real P90"] if col in mc_percentiles.columns]

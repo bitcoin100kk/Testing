@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -243,6 +244,135 @@ def _year_from_month(month_number: Optional[int]) -> float:
     return float(math.ceil(float(month_number) / 12.0))
 
 
+
+
+@dataclass(frozen=True)
+class MonteCarloForwardSpec:
+    mode: str
+    return_haircut_pct: float
+    return_shift_pct: float
+    vol_multiplier: float
+    aggressive_extra_haircut_pct: float
+    crypto_extra_haircut_pct: float
+    dividend_multiplier: float
+
+
+def _effective_forward_spec(portfolio_inputs: PortfolioInputs) -> MonteCarloForwardSpec:
+    mode = str(getattr(portfolio_inputs, "monte_carlo_forward_mode", "Historical Base"))
+    presets = {
+        "Historical Base": MonteCarloForwardSpec(
+            mode="Historical Base",
+            return_haircut_pct=0.0,
+            return_shift_pct=0.0,
+            vol_multiplier=1.0,
+            aggressive_extra_haircut_pct=0.0,
+            crypto_extra_haircut_pct=0.0,
+            dividend_multiplier=1.0,
+        ),
+        "Post-Bull Haircut": MonteCarloForwardSpec(
+            mode="Post-Bull Haircut",
+            return_haircut_pct=35.0,
+            return_shift_pct=-2.0,
+            vol_multiplier=1.15,
+            aggressive_extra_haircut_pct=15.0,
+            crypto_extra_haircut_pct=10.0,
+            dividend_multiplier=0.85,
+        ),
+        "Stagnation & De-Rating": MonteCarloForwardSpec(
+            mode="Stagnation & De-Rating",
+            return_haircut_pct=65.0,
+            return_shift_pct=-4.0,
+            vol_multiplier=1.35,
+            aggressive_extra_haircut_pct=25.0,
+            crypto_extra_haircut_pct=20.0,
+            dividend_multiplier=0.70,
+        ),
+    }
+    if mode != "Custom Forward Stress":
+        return presets.get(mode, presets["Historical Base"])
+    return MonteCarloForwardSpec(
+        mode="Custom Forward Stress",
+        return_haircut_pct=float(getattr(portfolio_inputs, "monte_carlo_return_haircut_pct", 0.0)),
+        return_shift_pct=float(getattr(portfolio_inputs, "monte_carlo_return_shift_pct", 0.0)),
+        vol_multiplier=float(getattr(portfolio_inputs, "monte_carlo_vol_multiplier", 1.0)),
+        aggressive_extra_haircut_pct=float(getattr(portfolio_inputs, "monte_carlo_growth_extra_haircut_pct", 0.0)),
+        crypto_extra_haircut_pct=float(getattr(portfolio_inputs, "monte_carlo_crypto_extra_haircut_pct", 0.0)),
+        dividend_multiplier=float(getattr(portfolio_inputs, "monte_carlo_dividend_multiplier", 1.0)),
+    )
+
+
+def _classify_forward_buckets(
+    historical_returns_df: pd.DataFrame,
+    assets: Sequence[AssetConfig],
+) -> Dict[str, str]:
+    tickers = [asset.ticker for asset in assets]
+    bucket_map = {ticker: "core" for ticker in tickers}
+
+    for asset in assets:
+        if str(asset.asset_type) == "Crypto":
+            bucket_map[asset.ticker] = "crypto"
+
+    stock_like = [asset.ticker for asset in assets if str(asset.asset_type) != "Crypto" and asset.ticker in historical_returns_df.columns]
+    if not stock_like:
+        return bucket_map
+
+    vol = historical_returns_df[stock_like].std(axis=0, ddof=0).fillna(0.0).sort_values()
+    ordered = list(vol.index)
+    if len(ordered) == 1:
+        return bucket_map
+
+    low_count = max(1, len(ordered) // 3)
+    high_count = max(1, len(ordered) // 3)
+    low_bucket = set(ordered[:low_count])
+    high_bucket = set(ordered[-high_count:])
+
+    for ticker in low_bucket - high_bucket:
+        bucket_map[ticker] = "defensive"
+    for ticker in high_bucket:
+        bucket_map[ticker] = "aggressive"
+    return bucket_map
+
+
+def _monthly_target_from_annual_pct(annual_pct: float) -> float:
+    annual_pct = max(float(annual_pct), -99.999999)
+    return (((1.0 + (annual_pct / 100.0)) ** (1.0 / 12.0)) - 1.0) * 100.0
+
+
+def _apply_forward_overlay(
+    *,
+    sampled_returns: np.ndarray,
+    sampled_dividends: np.ndarray,
+    historical_returns_df: pd.DataFrame,
+    assets: Sequence[AssetConfig],
+    forward_spec: MonteCarloForwardSpec,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if forward_spec.mode == "Historical Base":
+        return sampled_returns, sampled_dividends
+
+    returns_adj = np.asarray(sampled_returns, dtype=float).copy()
+    dividends_adj = np.asarray(sampled_dividends, dtype=float).copy()
+    hist_returns = historical_returns_df.to_numpy(dtype=float)
+    hist_mu = hist_returns.mean(axis=0)
+    bucket_map = _classify_forward_buckets(historical_returns_df, assets)
+
+    for j, asset in enumerate(assets):
+        bucket = bucket_map.get(asset.ticker, "core")
+        bucket_extra = forward_spec.aggressive_extra_haircut_pct if bucket == "aggressive" else 0.0
+        crypto_extra = forward_spec.crypto_extra_haircut_pct if bucket == "crypto" else 0.0
+        total_haircut = min(max(forward_spec.return_haircut_pct + bucket_extra + crypto_extra, 0.0), 100.0)
+
+        hist_monthly_mu = float(hist_mu[j])
+        hist_annual = ((1.0 + (hist_monthly_mu / 100.0)) ** 12 - 1.0) * 100.0
+        target_annual = (hist_annual * (1.0 - (total_haircut / 100.0))) + float(forward_spec.return_shift_pct)
+        target_monthly_mu = _monthly_target_from_annual_pct(target_annual)
+        centered = returns_adj[:, j] - hist_monthly_mu
+        returns_adj[:, j] = target_monthly_mu + (centered * float(forward_spec.vol_multiplier))
+
+    returns_adj = np.clip(returns_adj, -99.999, None)
+    dividends_adj = np.clip(dividends_adj * float(forward_spec.dividend_multiplier), 0.0, None)
+    return returns_adj, dividends_adj
+
+
 def simulate_monte_carlo(
     portfolio_inputs: PortfolioInputs,
     assets: Sequence[AssetConfig],
@@ -278,6 +408,7 @@ def simulate_monte_carlo(
         regime_mode=portfolio_inputs.monte_carlo_regime_mode,
         regime_strength=portfolio_inputs.monte_carlo_regime_strength,
     )
+    forward_spec = _effective_forward_spec(portfolio_inputs)
     plan = build_mc_path_plan(portfolio_inputs=portfolio_inputs, assets=assets, start_period=start_period)
 
     nominal_paths = np.empty((max_sims, horizon_years), dtype=float)
@@ -320,11 +451,21 @@ def simulate_monte_carlo(
                 start_probabilities=start_probabilities,
             )
 
+        sampled_returns = returns_arr[sampled_idx]
+        sampled_dividends = dividends_arr[sampled_idx]
+        sampled_returns, sampled_dividends = _apply_forward_overlay(
+            sampled_returns=sampled_returns,
+            sampled_dividends=sampled_dividends,
+            historical_returns_df=historical_returns_df,
+            assets=assets,
+            forward_spec=forward_spec,
+        )
+
         path_result = simulate_portfolio_path(
             portfolio_inputs=portfolio_inputs,
             plan=plan,
-            returns_matrix=returns_arr[sampled_idx],
-            dividends_matrix=dividends_arr[sampled_idx],
+            returns_matrix=sampled_returns,
+            dividends_matrix=sampled_dividends,
         )
 
         nominal_paths[sim, :] = path_result.yearly_balances

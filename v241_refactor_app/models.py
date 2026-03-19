@@ -48,6 +48,13 @@ class PortfolioInputs:
     monte_carlo_regime_strength: float
     monte_carlo_adaptive_convergence: bool
     monte_carlo_target_stderr_pct: float
+    monte_carlo_forward_mode: str
+    monte_carlo_return_haircut_pct: float
+    monte_carlo_return_shift_pct: float
+    monte_carlo_vol_multiplier: float
+    monte_carlo_growth_extra_haircut_pct: float
+    monte_carlo_crypto_extra_haircut_pct: float
+    monte_carlo_dividend_multiplier: float
 
 
 PORTFOLIO_INPUT_DEFAULTS = {
@@ -83,6 +90,13 @@ PORTFOLIO_INPUT_DEFAULTS = {
     "monte_carlo_regime_strength": 1.0,
     "monte_carlo_adaptive_convergence": True,
     "monte_carlo_target_stderr_pct": 0.35,
+    "monte_carlo_forward_mode": "Historical Base",
+    "monte_carlo_return_haircut_pct": 35.0,
+    "monte_carlo_return_shift_pct": -2.0,
+    "monte_carlo_vol_multiplier": 1.15,
+    "monte_carlo_growth_extra_haircut_pct": 15.0,
+    "monte_carlo_crypto_extra_haircut_pct": 10.0,
+    "monte_carlo_dividend_multiplier": 0.85,
 }
 
 

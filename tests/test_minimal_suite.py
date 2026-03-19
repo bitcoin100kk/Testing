@@ -221,3 +221,99 @@ def test_parametric_var_95_is_reported_as_loss_sign():
 
     metrics = compute_risk_metrics(results_df)
     assert metrics["Parametric VaR 95"] <= 0.0
+
+
+def test_forward_overlay_custom_mode_reduces_drift_and_dividends():
+    from v241_refactor_app.monte_carlo import _apply_forward_overlay, _effective_forward_spec
+
+    assets = make_assets((("AAA", 60.0, "Stock"), ("BBB", 40.0, "Crypto")))
+    historical_returns_df = pd.DataFrame(
+        {
+            "AAA": [2.0, 1.5, 2.5, 1.8, 2.2, 1.9],
+            "BBB": [5.0, 4.5, 6.0, 5.5, 4.8, 5.2],
+        }
+    )
+    sampled_returns = historical_returns_df.to_numpy(dtype=float)
+    sampled_dividends = np.array([[0.20, 0.0]] * len(historical_returns_df), dtype=float)
+    inputs = make_portfolio_inputs(
+        monte_carlo_forward_mode="Custom Forward Stress",
+        monte_carlo_return_haircut_pct=50.0,
+        monte_carlo_return_shift_pct=-3.0,
+        monte_carlo_vol_multiplier=1.25,
+        monte_carlo_growth_extra_haircut_pct=10.0,
+        monte_carlo_crypto_extra_haircut_pct=15.0,
+        monte_carlo_dividend_multiplier=0.5,
+    )
+
+    forward_spec = _effective_forward_spec(inputs)
+    adjusted_returns, adjusted_dividends = _apply_forward_overlay(
+        sampled_returns=sampled_returns,
+        sampled_dividends=sampled_dividends,
+        historical_returns_df=historical_returns_df,
+        assets=assets,
+        forward_spec=forward_spec,
+    )
+
+    assert adjusted_returns.shape == sampled_returns.shape
+    assert adjusted_dividends.shape == sampled_dividends.shape
+    assert float(adjusted_returns[:, 0].mean()) < float(sampled_returns[:, 0].mean())
+    assert float(adjusted_returns[:, 1].mean()) < float(sampled_returns[:, 1].mean())
+    assert float(adjusted_dividends[:, 0].max()) == 0.10
+    assert float(adjusted_dividends[:, 1].max()) == 0.0
+
+
+def test_forward_stress_mode_lowers_mc_median_path(base_assets, base_dataset):
+    historical_inputs = make_portfolio_inputs(
+        contribution_amount=0.0,
+        withdrawal_rate=0.0,
+        annual_fee_rate=0.0,
+        tax_rate_dividends=0.0,
+        tax_rate_withdrawals=0.0,
+        rebalance_cost_bps=0.0,
+        cashflow_trade_cost_bps=0.0,
+        rebalancing_method="Annual",
+        monte_carlo_sims=64,
+        monte_carlo_years=2,
+        monte_carlo_seed=42,
+        monte_carlo_adaptive_convergence=False,
+        monte_carlo_forward_mode="Historical Base",
+    )
+    stressed_inputs = make_portfolio_inputs(
+        contribution_amount=0.0,
+        withdrawal_rate=0.0,
+        annual_fee_rate=0.0,
+        tax_rate_dividends=0.0,
+        tax_rate_withdrawals=0.0,
+        rebalance_cost_bps=0.0,
+        cashflow_trade_cost_bps=0.0,
+        rebalancing_method="Annual",
+        monte_carlo_sims=64,
+        monte_carlo_years=2,
+        monte_carlo_seed=42,
+        monte_carlo_adaptive_convergence=False,
+        monte_carlo_forward_mode="Stagnation & De-Rating",
+    )
+
+    selection = run_historical_simulation(
+        portfolio_inputs=historical_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+
+    base_percentiles, _, _, _ = simulate_monte_carlo(
+        portfolio_inputs=historical_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+    stressed_percentiles, _, _, _ = simulate_monte_carlo(
+        portfolio_inputs=stressed_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+
+    assert float(stressed_percentiles["Median"].iloc[-1]) < float(base_percentiles["Median"].iloc[-1])
