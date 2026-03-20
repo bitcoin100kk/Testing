@@ -317,3 +317,93 @@ def test_forward_stress_mode_lowers_mc_median_path(base_assets, base_dataset):
     )
 
     assert float(stressed_percentiles["Median"].iloc[-1]) < float(base_percentiles["Median"].iloc[-1])
+
+
+def test_bucket_cma_targets_forward_mode_applies_bucket_specific_targets():
+    from v241_refactor_app.monte_carlo import _apply_forward_overlay, _effective_forward_spec
+
+    assets = make_assets((('AAA', 50.0, 'Stock'), ('BBB', 50.0, 'Crypto')))
+    historical_returns_df = pd.DataFrame(
+        {
+            'AAA': [0.8, 1.0, 1.2, 0.9, 1.1, 1.0],
+            'BBB': [3.0, 4.0, 5.0, 4.5, 3.5, 4.2],
+        }
+    )
+    sampled_returns = historical_returns_df.to_numpy(dtype=float)
+    sampled_dividends = np.array([[0.20, 0.0]] * len(historical_returns_df), dtype=float)
+    inputs = make_portfolio_inputs(
+        monte_carlo_forward_mode='Bucket CMA Targets',
+        monte_carlo_bucket_cma_core_return_pct=6.0,
+        monte_carlo_bucket_cma_crypto_return_pct=0.0,
+        monte_carlo_bucket_cma_core_vol_multiplier=1.0,
+        monte_carlo_bucket_cma_crypto_vol_multiplier=1.0,
+        monte_carlo_dividend_multiplier=0.5,
+    )
+
+    forward_spec = _effective_forward_spec(inputs)
+    adjusted_returns, adjusted_dividends = _apply_forward_overlay(
+        sampled_returns=sampled_returns,
+        sampled_dividends=sampled_dividends,
+        historical_returns_df=historical_returns_df,
+        assets=assets,
+        forward_spec=forward_spec,
+    )
+
+    aaa_target_monthly = (((1.0 + 0.06) ** (1.0 / 12.0)) - 1.0) * 100.0
+    bbb_target_monthly = 0.0
+    assert abs(float(adjusted_returns[:, 0].mean()) - aaa_target_monthly) < 1e-9
+    assert abs(float(adjusted_returns[:, 1].mean()) - bbb_target_monthly) < 1e-9
+    assert float(adjusted_dividends[:, 0].max()) == 0.10
+
+
+
+def test_fragility_analysis_returns_ranked_scenarios(base_inputs, base_assets, base_dataset):
+    from v241_refactor_app.analysis_lab import build_fragility_analysis
+
+    selection = run_historical_simulation(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+    outputs = build_fragility_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+
+    fragility_df = outputs['fragility_df']
+    fragility_pivot_df = outputs['fragility_pivot_df']
+    assert not fragility_df.empty
+    assert fragility_df.iloc[0]['Scenario'] == 'Base Case'
+    assert 'Fragility Rank' in fragility_df.columns
+    assert not fragility_pivot_df.empty
+
+
+
+def test_decision_engine_ranks_policies(base_inputs, base_assets, base_dataset):
+    from v241_refactor_app.analysis_lab import build_decision_policy_analysis
+
+    selection = run_historical_simulation(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+    outputs = build_decision_policy_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+        objective='Balanced robustness',
+    )
+
+    policy_df = outputs['policy_df']
+    recommendation_df = outputs['recommendation_df']
+    assert not policy_df.empty
+    assert int(policy_df.iloc[0]['Rank']) == 1
+    assert 'Current' in set(policy_df['Policy'])
+    assert not recommendation_df.empty

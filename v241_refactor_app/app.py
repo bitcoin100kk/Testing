@@ -86,6 +86,14 @@ def _build_portfolio_inputs(
     monte_carlo_growth_extra_haircut_pct: float,
     monte_carlo_crypto_extra_haircut_pct: float,
     monte_carlo_dividend_multiplier: float,
+    monte_carlo_bucket_cma_defensive_return_pct: float,
+    monte_carlo_bucket_cma_core_return_pct: float,
+    monte_carlo_bucket_cma_aggressive_return_pct: float,
+    monte_carlo_bucket_cma_crypto_return_pct: float,
+    monte_carlo_bucket_cma_defensive_vol_multiplier: float,
+    monte_carlo_bucket_cma_core_vol_multiplier: float,
+    monte_carlo_bucket_cma_aggressive_vol_multiplier: float,
+    monte_carlo_bucket_cma_crypto_vol_multiplier: float,
 ) -> PortfolioInputs:
     contribution_end_year = int(contribution_end_year_input) if str(contribution_end_year_input).strip() else None
     return PortfolioInputs(
@@ -128,6 +136,14 @@ def _build_portfolio_inputs(
         monte_carlo_growth_extra_haircut_pct=float(monte_carlo_growth_extra_haircut_pct),
         monte_carlo_crypto_extra_haircut_pct=float(monte_carlo_crypto_extra_haircut_pct),
         monte_carlo_dividend_multiplier=float(monte_carlo_dividend_multiplier),
+        monte_carlo_bucket_cma_defensive_return_pct=float(monte_carlo_bucket_cma_defensive_return_pct),
+        monte_carlo_bucket_cma_core_return_pct=float(monte_carlo_bucket_cma_core_return_pct),
+        monte_carlo_bucket_cma_aggressive_return_pct=float(monte_carlo_bucket_cma_aggressive_return_pct),
+        monte_carlo_bucket_cma_crypto_return_pct=float(monte_carlo_bucket_cma_crypto_return_pct),
+        monte_carlo_bucket_cma_defensive_vol_multiplier=float(monte_carlo_bucket_cma_defensive_vol_multiplier),
+        monte_carlo_bucket_cma_core_vol_multiplier=float(monte_carlo_bucket_cma_core_vol_multiplier),
+        monte_carlo_bucket_cma_aggressive_vol_multiplier=float(monte_carlo_bucket_cma_aggressive_vol_multiplier),
+        monte_carlo_bucket_cma_crypto_vol_multiplier=float(monte_carlo_bucket_cma_crypto_vol_multiplier),
     )
 
 
@@ -179,6 +195,14 @@ def _mc_signature(active_core_signature: str, active_inputs: PortfolioInputs, ye
                 "growth_extra_haircut_pct": active_inputs.monte_carlo_growth_extra_haircut_pct,
                 "crypto_extra_haircut_pct": active_inputs.monte_carlo_crypto_extra_haircut_pct,
                 "dividend_multiplier": active_inputs.monte_carlo_dividend_multiplier,
+                "bucket_cma_defensive_return_pct": active_inputs.monte_carlo_bucket_cma_defensive_return_pct,
+                "bucket_cma_core_return_pct": active_inputs.monte_carlo_bucket_cma_core_return_pct,
+                "bucket_cma_aggressive_return_pct": active_inputs.monte_carlo_bucket_cma_aggressive_return_pct,
+                "bucket_cma_crypto_return_pct": active_inputs.monte_carlo_bucket_cma_crypto_return_pct,
+                "bucket_cma_defensive_vol_multiplier": active_inputs.monte_carlo_bucket_cma_defensive_vol_multiplier,
+                "bucket_cma_core_vol_multiplier": active_inputs.monte_carlo_bucket_cma_core_vol_multiplier,
+                "bucket_cma_aggressive_vol_multiplier": active_inputs.monte_carlo_bucket_cma_aggressive_vol_multiplier,
+                "bucket_cma_crypto_vol_multiplier": active_inputs.monte_carlo_bucket_cma_crypto_vol_multiplier,
             },
         }
     )
@@ -361,7 +385,7 @@ def main() -> None:
         with mc10:
             monte_carlo_target_stderr_pct = float(st.number_input("Target Failure StdErr (%)", min_value=0.05, max_value=5.0, value=float(st.session_state.get("monte_carlo_target_stderr_pct", 0.35)), step=0.05, key="monte_carlo_target_stderr_pct"))
 
-        forward_mode_options = ["Historical Base", "Post-Bull Haircut", "Stagnation & De-Rating", "Custom Forward Stress"]
+        forward_mode_options = ["Historical Base", "Post-Bull Haircut", "Stagnation & De-Rating", "Custom Forward Stress", "Bucket CMA Targets"]
         monte_carlo_forward_mode = st.selectbox(
             "Forward MC Mode",
             forward_mode_options,
@@ -374,10 +398,13 @@ def main() -> None:
             st.caption("Applies a forward-looking haircut to historical drift, modestly higher volatility, and softer dividend assumptions while preserving sampled path structure.")
         elif monte_carlo_forward_mode == "Stagnation & De-Rating":
             st.caption("Applies a harder drift reset, higher volatility, and weaker income assumptions to model flat or post-bull regimes.")
+        elif monte_carlo_forward_mode == "Bucket CMA Targets":
+            st.caption("Lets you set transparent annual return and volatility assumptions for defensive, core, aggressive, and crypto buckets while preserving the bootstrap path structure.")
         else:
             st.caption("Custom forward stress lets you override drift, volatility, and dividend assumptions on top of the historical/bootstrap path engine.")
 
         custom_forward_mode = monte_carlo_forward_mode == "Custom Forward Stress"
+        bucket_cma_mode = monte_carlo_forward_mode == "Bucket CMA Targets"
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
             monte_carlo_return_haircut_pct = float(st.number_input("Annual Return Haircut (%)", min_value=0.0, max_value=100.0, value=float(st.session_state.get("monte_carlo_return_haircut_pct", 35.0)), step=1.0, key="monte_carlo_return_haircut_pct", disabled=not custom_forward_mode))
@@ -392,7 +419,27 @@ def main() -> None:
         with fc5:
             monte_carlo_crypto_extra_haircut_pct = float(st.number_input("Crypto Extra Haircut (%)", min_value=0.0, max_value=100.0, value=float(st.session_state.get("monte_carlo_crypto_extra_haircut_pct", 10.0)), step=1.0, key="monte_carlo_crypto_extra_haircut_pct", disabled=not custom_forward_mode))
         with fc6:
-            monte_carlo_dividend_multiplier = float(st.number_input("Dividend Multiplier", min_value=0.0, max_value=2.0, value=float(st.session_state.get("monte_carlo_dividend_multiplier", 0.85)), step=0.05, key="monte_carlo_dividend_multiplier", disabled=not custom_forward_mode))
+            monte_carlo_dividend_multiplier = float(st.number_input("Dividend Multiplier", min_value=0.0, max_value=2.0, value=float(st.session_state.get("monte_carlo_dividend_multiplier", 0.85)), step=0.05, key="monte_carlo_dividend_multiplier", disabled=not (custom_forward_mode or bucket_cma_mode)))
+
+        cma1, cma2, cma3, cma4 = st.columns(4)
+        with cma1:
+            monte_carlo_bucket_cma_defensive_return_pct = float(st.number_input("Defensive Target Return (%)", min_value=-25.0, max_value=25.0, value=float(st.session_state.get("monte_carlo_bucket_cma_defensive_return_pct", 4.0)), step=0.5, key="monte_carlo_bucket_cma_defensive_return_pct", disabled=not bucket_cma_mode))
+        with cma2:
+            monte_carlo_bucket_cma_core_return_pct = float(st.number_input("Core Target Return (%)", min_value=-25.0, max_value=25.0, value=float(st.session_state.get("monte_carlo_bucket_cma_core_return_pct", 6.0)), step=0.5, key="monte_carlo_bucket_cma_core_return_pct", disabled=not bucket_cma_mode))
+        with cma3:
+            monte_carlo_bucket_cma_aggressive_return_pct = float(st.number_input("Aggressive Target Return (%)", min_value=-25.0, max_value=25.0, value=float(st.session_state.get("monte_carlo_bucket_cma_aggressive_return_pct", 8.0)), step=0.5, key="monte_carlo_bucket_cma_aggressive_return_pct", disabled=not bucket_cma_mode))
+        with cma4:
+            monte_carlo_bucket_cma_crypto_return_pct = float(st.number_input("Crypto Target Return (%)", min_value=-50.0, max_value=50.0, value=float(st.session_state.get("monte_carlo_bucket_cma_crypto_return_pct", 12.0)), step=1.0, key="monte_carlo_bucket_cma_crypto_return_pct", disabled=not bucket_cma_mode))
+
+        cma5, cma6, cma7, cma8 = st.columns(4)
+        with cma5:
+            monte_carlo_bucket_cma_defensive_vol_multiplier = float(st.number_input("Defensive Vol Multiplier", min_value=0.25, max_value=3.0, value=float(st.session_state.get("monte_carlo_bucket_cma_defensive_vol_multiplier", 0.90)), step=0.05, key="monte_carlo_bucket_cma_defensive_vol_multiplier", disabled=not bucket_cma_mode))
+        with cma6:
+            monte_carlo_bucket_cma_core_vol_multiplier = float(st.number_input("Core Vol Multiplier", min_value=0.25, max_value=3.0, value=float(st.session_state.get("monte_carlo_bucket_cma_core_vol_multiplier", 1.00)), step=0.05, key="monte_carlo_bucket_cma_core_vol_multiplier", disabled=not bucket_cma_mode))
+        with cma7:
+            monte_carlo_bucket_cma_aggressive_vol_multiplier = float(st.number_input("Aggressive Vol Multiplier", min_value=0.25, max_value=3.0, value=float(st.session_state.get("monte_carlo_bucket_cma_aggressive_vol_multiplier", 1.10)), step=0.05, key="monte_carlo_bucket_cma_aggressive_vol_multiplier", disabled=not bucket_cma_mode))
+        with cma8:
+            monte_carlo_bucket_cma_crypto_vol_multiplier = float(st.number_input("Crypto Vol Multiplier", min_value=0.25, max_value=4.0, value=float(st.session_state.get("monte_carlo_bucket_cma_crypto_vol_multiplier", 1.25)), step=0.05, key="monte_carlo_bucket_cma_crypto_vol_multiplier", disabled=not bucket_cma_mode))
 
     assets = collect_assets(num_assets)
     run_clicked = st.button("Run simulation", type="primary")
@@ -438,6 +485,14 @@ def main() -> None:
         "monte_carlo_growth_extra_haircut_pct": float(monte_carlo_growth_extra_haircut_pct),
         "monte_carlo_crypto_extra_haircut_pct": float(monte_carlo_crypto_extra_haircut_pct),
         "monte_carlo_dividend_multiplier": float(monte_carlo_dividend_multiplier),
+        "monte_carlo_bucket_cma_defensive_return_pct": float(monte_carlo_bucket_cma_defensive_return_pct),
+        "monte_carlo_bucket_cma_core_return_pct": float(monte_carlo_bucket_cma_core_return_pct),
+        "monte_carlo_bucket_cma_aggressive_return_pct": float(monte_carlo_bucket_cma_aggressive_return_pct),
+        "monte_carlo_bucket_cma_crypto_return_pct": float(monte_carlo_bucket_cma_crypto_return_pct),
+        "monte_carlo_bucket_cma_defensive_vol_multiplier": float(monte_carlo_bucket_cma_defensive_vol_multiplier),
+        "monte_carlo_bucket_cma_core_vol_multiplier": float(monte_carlo_bucket_cma_core_vol_multiplier),
+        "monte_carlo_bucket_cma_aggressive_vol_multiplier": float(monte_carlo_bucket_cma_aggressive_vol_multiplier),
+        "monte_carlo_bucket_cma_crypto_vol_multiplier": float(monte_carlo_bucket_cma_crypto_vol_multiplier),
     }
     raw_signature = build_raw_signature(_build_raw_state_payload(assets, widget_payload, tiingo_token))
 
@@ -487,6 +542,14 @@ def main() -> None:
             monte_carlo_growth_extra_haircut_pct=monte_carlo_growth_extra_haircut_pct,
             monte_carlo_crypto_extra_haircut_pct=monte_carlo_crypto_extra_haircut_pct,
             monte_carlo_dividend_multiplier=monte_carlo_dividend_multiplier,
+            monte_carlo_bucket_cma_defensive_return_pct=monte_carlo_bucket_cma_defensive_return_pct,
+            monte_carlo_bucket_cma_core_return_pct=monte_carlo_bucket_cma_core_return_pct,
+            monte_carlo_bucket_cma_aggressive_return_pct=monte_carlo_bucket_cma_aggressive_return_pct,
+            monte_carlo_bucket_cma_crypto_return_pct=monte_carlo_bucket_cma_crypto_return_pct,
+            monte_carlo_bucket_cma_defensive_vol_multiplier=monte_carlo_bucket_cma_defensive_vol_multiplier,
+            monte_carlo_bucket_cma_core_vol_multiplier=monte_carlo_bucket_cma_core_vol_multiplier,
+            monte_carlo_bucket_cma_aggressive_vol_multiplier=monte_carlo_bucket_cma_aggressive_vol_multiplier,
+            monte_carlo_bucket_cma_crypto_vol_multiplier=monte_carlo_bucket_cma_crypto_vol_multiplier,
         )
         current_valid_snapshot = orch.make_run_snapshot(portfolio_inputs, valid_assets, tiingo_token, raw_signature)
         current_core_signature = orch.snapshot_core_signature(current_valid_snapshot)
@@ -584,8 +647,8 @@ def main() -> None:
         cached_scenario = get_bucket_artifact("scenario", scenario_signature)
         scenario_comparison_df = cached_scenario if isinstance(cached_scenario, pd.DataFrame) else None
 
-        results_tab, risk_tab, scenario_tab, benchmark_tab, component_tab, monte_tab = st.tabs(
-            ["Overview", "Risk", "Scenarios", "Benchmark", "Per-Asset", "Monte Carlo"]
+        results_tab, risk_tab, scenario_tab, benchmark_tab, component_tab, monte_tab, lab_tab = st.tabs(
+            ["Overview", "Risk", "Scenarios", "Benchmark", "Per-Asset", "Monte Carlo", "Decision Lab"]
         )
 
         with results_tab:
@@ -768,6 +831,83 @@ def main() -> None:
                         st.dataframe(mc_convergence, use_container_width=True)
             else:
                 st.info("Set Analysis Mode to Monte Carlo or Both to enable this tab.")
+
+        with lab_tab:
+            st.subheader("Forward Assumption Audit")
+            forward_audit_df = orch.build_forward_assumption_audit_cached(
+                portfolio_input_dict=active_snapshot.portfolio_inputs,
+                asset_specs=orch.snapshot_asset_specs(active_snapshot),
+                selected_returns_df=core_artifacts.selection.selected_returns_df,
+            )
+            st.caption("This table shows how the active forward mode maps each asset into a bucket and what annual return / volatility assumptions are being imposed before Monte Carlo paths are simulated.")
+            st.dataframe(forward_audit_df, use_container_width=True)
+
+            fragility_subtab, decision_subtab = st.tabs(["Fragility", "Decision Engine"])
+            fragility_signature = build_raw_signature({"kind": "fragility", "core": active_core_signature, "year_range": list(year_range)})
+            with fragility_subtab:
+                st.caption("Fragility runs use a reduced simulation count on purpose so they behave like a fast sensitivity lab rather than a second full Monte Carlo stack.")
+                if st.button("Build fragility layer", key="build_fragility_layer"):
+                    with st.spinner("Running fragility sweeps..."):
+                        fragility_outputs = orch.build_fragility_artifacts_cached(
+                            portfolio_input_dict=active_snapshot.portfolio_inputs,
+                            asset_specs=orch.snapshot_asset_specs(active_snapshot),
+                            selected_returns_df=core_artifacts.selection.selected_returns_df,
+                            selected_divs_df=core_artifacts.selection.selected_divs_df,
+                            start_period=core_artifacts.selection.filtered_periods[0],
+                        )
+                    st.session_state["latest_fragility_outputs"] = {"signature": fragility_signature, "payload": fragility_outputs}
+                fragility_state = st.session_state.get("latest_fragility_outputs")
+                fragility_outputs = fragility_state.get("payload") if isinstance(fragility_state, dict) and fragility_state.get("signature") == fragility_signature else None
+                if isinstance(fragility_outputs, dict):
+                    fragility_df = fragility_outputs.get("fragility_df")
+                    fragility_pivot_df = fragility_outputs.get("fragility_pivot_df")
+                    if isinstance(fragility_df, pd.DataFrame) and not fragility_df.empty:
+                        st.dataframe(fragility_df, use_container_width=True)
+                        delta_cols = [col for col in fragility_df.columns if col.startswith("Delta vs Base ::")][:4]
+                        if delta_cols:
+                            st.bar_chart(fragility_df.set_index("Scenario")[delta_cols])
+                    if isinstance(fragility_pivot_df, pd.DataFrame) and not fragility_pivot_df.empty:
+                        st.subheader("Failure-rate matrix: withdrawal rate vs forward return shift")
+                        st.dataframe(fragility_pivot_df, use_container_width=True)
+                else:
+                    st.info("Build the fragility layer to see ranked sensitivities and a failure-rate matrix.")
+
+            with decision_subtab:
+                decision_objective = st.selectbox(
+                    "Decision objective",
+                    ["Minimize failure rate", "Maximize downside resilience", "Balanced robustness", "Maximize legacy"],
+                    key="decision_objective",
+                )
+                decision_signature = build_raw_signature({"kind": "decision", "core": active_core_signature, "year_range": list(year_range), "objective": decision_objective})
+                st.caption("This constrained decision layer does not invent new withdrawal rules. It only compares safe policy variants that already exist inside the engine: lower spending, dividend-first withdrawals, and alternate rebalancing policies.")
+                if st.button("Run decision engine", key="run_decision_engine"):
+                    with st.spinner("Ranking policy variants..."):
+                        decision_outputs = orch.build_decision_artifacts_cached(
+                            portfolio_input_dict=active_snapshot.portfolio_inputs,
+                            asset_specs=orch.snapshot_asset_specs(active_snapshot),
+                            selected_returns_df=core_artifacts.selection.selected_returns_df,
+                            selected_divs_df=core_artifacts.selection.selected_divs_df,
+                            start_period=core_artifacts.selection.filtered_periods[0],
+                            objective=decision_objective,
+                        )
+                    st.session_state["latest_decision_outputs"] = {"signature": decision_signature, "payload": decision_outputs}
+                decision_state = st.session_state.get("latest_decision_outputs")
+                decision_outputs = decision_state.get("payload") if isinstance(decision_state, dict) and decision_state.get("signature") == decision_signature else None
+                if isinstance(decision_outputs, dict):
+                    recommendation_text = decision_outputs.get("recommendation_text")
+                    policy_df = decision_outputs.get("policy_df")
+                    recommendation_df = decision_outputs.get("recommendation_df")
+                    if recommendation_text:
+                        st.success(str(recommendation_text))
+                    if isinstance(recommendation_df, pd.DataFrame) and not recommendation_df.empty:
+                        st.dataframe(recommendation_df, use_container_width=True)
+                    if isinstance(policy_df, pd.DataFrame) and not policy_df.empty:
+                        st.dataframe(policy_df, use_container_width=True)
+                        frontier_cols = [col for col in ["Failure Rate (%)", "Real Median Ending Balance (USD)", "Real P10 Ending Balance (USD)"] if col in policy_df.columns]
+                        if frontier_cols:
+                            st.bar_chart(policy_df.set_index("Policy")[frontier_cols])
+                else:
+                    st.info("Run the decision engine to rank safe policy alternatives around the current plan.")
 
         st.subheader("Workbook Export")
         export_signature = _export_signature(

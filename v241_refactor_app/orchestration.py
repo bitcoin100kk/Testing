@@ -12,11 +12,12 @@ from .analytics import (
     compute_rolling_returns,
     compute_summary_metrics,
 )
+from .analysis_lab import build_decision_policy_analysis, build_fragility_analysis
 from .data_layer import prepare_historical_dataset
 from .engine import run_historical_simulation
 from .exporters import export_full_simulation_workbook
 from .models import AssetConfig, HistoricalSelection, PortfolioInputs, RunArtifacts, RunSnapshot
-from .monte_carlo import simulate_monte_carlo
+from .monte_carlo import build_forward_assumption_audit, simulate_monte_carlo
 from .utils import (
     build_core_signature,
     deserialize_assets,
@@ -68,6 +69,63 @@ def simulate_monte_carlo_cached(
         "paths_df": paths_df,
         "convergence_df": convergence_df,
     }
+
+
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_fragility_artifacts_cached(
+    portfolio_input_dict: Dict[str, object],
+    asset_specs: Tuple[Tuple[str, float, str], ...],
+    selected_returns_df: pd.DataFrame,
+    selected_divs_df: pd.DataFrame,
+    start_period: pd.Timestamp,
+) -> Dict[str, pd.DataFrame]:
+    portfolio_inputs = deserialize_portfolio_inputs(portfolio_input_dict)
+    assets = deserialize_assets(asset_specs)
+    return build_fragility_analysis(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=selected_returns_df,
+        historical_dividends_df=selected_divs_df,
+        start_period=start_period,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_decision_artifacts_cached(
+    portfolio_input_dict: Dict[str, object],
+    asset_specs: Tuple[Tuple[str, float, str], ...],
+    selected_returns_df: pd.DataFrame,
+    selected_divs_df: pd.DataFrame,
+    start_period: pd.Timestamp,
+    objective: str,
+) -> Dict[str, object]:
+    portfolio_inputs = deserialize_portfolio_inputs(portfolio_input_dict)
+    assets = deserialize_assets(asset_specs)
+    return build_decision_policy_analysis(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=selected_returns_df,
+        historical_dividends_df=selected_divs_df,
+        start_period=start_period,
+        objective=objective,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_forward_assumption_audit_cached(
+    portfolio_input_dict: Dict[str, object],
+    asset_specs: Tuple[Tuple[str, float, str], ...],
+    selected_returns_df: pd.DataFrame,
+) -> pd.DataFrame:
+    portfolio_inputs = deserialize_portfolio_inputs(portfolio_input_dict)
+    assets = deserialize_assets(asset_specs)
+    return build_forward_assumption_audit(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=selected_returns_df,
+    )
 
 
 def make_run_snapshot(portfolio_inputs: PortfolioInputs, assets: Sequence[AssetConfig], token: str, raw_signature: str) -> RunSnapshot:

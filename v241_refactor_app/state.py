@@ -4,7 +4,7 @@ from typing import Optional, Sequence, Tuple
 
 import streamlit as st
 
-ARTIFACT_BUCKETS = ("core", "benchmark", "scenario", "mc", "export")
+ARTIFACT_BUCKETS = ("core", "benchmark", "scenario", "mc", "fragility", "decision", "export")
 MAX_BUCKET_ITEMS = 12
 
 

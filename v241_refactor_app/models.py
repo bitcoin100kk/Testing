@@ -55,6 +55,14 @@ class PortfolioInputs:
     monte_carlo_growth_extra_haircut_pct: float
     monte_carlo_crypto_extra_haircut_pct: float
     monte_carlo_dividend_multiplier: float
+    monte_carlo_bucket_cma_defensive_return_pct: float
+    monte_carlo_bucket_cma_core_return_pct: float
+    monte_carlo_bucket_cma_aggressive_return_pct: float
+    monte_carlo_bucket_cma_crypto_return_pct: float
+    monte_carlo_bucket_cma_defensive_vol_multiplier: float
+    monte_carlo_bucket_cma_core_vol_multiplier: float
+    monte_carlo_bucket_cma_aggressive_vol_multiplier: float
+    monte_carlo_bucket_cma_crypto_vol_multiplier: float
 
 
 PORTFOLIO_INPUT_DEFAULTS = {
@@ -97,6 +105,14 @@ PORTFOLIO_INPUT_DEFAULTS = {
     "monte_carlo_growth_extra_haircut_pct": 15.0,
     "monte_carlo_crypto_extra_haircut_pct": 10.0,
     "monte_carlo_dividend_multiplier": 0.85,
+    "monte_carlo_bucket_cma_defensive_return_pct": 4.0,
+    "monte_carlo_bucket_cma_core_return_pct": 6.0,
+    "monte_carlo_bucket_cma_aggressive_return_pct": 8.0,
+    "monte_carlo_bucket_cma_crypto_return_pct": 12.0,
+    "monte_carlo_bucket_cma_defensive_vol_multiplier": 0.90,
+    "monte_carlo_bucket_cma_core_vol_multiplier": 1.00,
+    "monte_carlo_bucket_cma_aggressive_vol_multiplier": 1.10,
+    "monte_carlo_bucket_cma_crypto_vol_multiplier": 1.25,
 }
 
 

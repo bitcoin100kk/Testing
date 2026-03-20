@@ -1,0 +1,105 @@
+V242 bundle upgrade: fragility layer + constrained decision layer + constrained forward assumptions layer
+
+What was added
+
+1) Fragility layer
+- New module: v241_refactor_app/analysis_lab.py
+- Adds build_fragility_analysis(...)
+- Runs an on-demand reduced-sim Monte Carlo sensitivity sweep around the current scenario.
+- Produces:
+  - fragility_df: ranked sensitivity table vs base case
+  - fragility_grid_df: raw grid results for withdrawal-rate x forward-return-shift
+  - fragility_pivot_df: failure-rate matrix for quick inspection
+- Implemented as a wrapper around the existing Monte Carlo engine, not a rewrite.
+- Purposefully uses a reduced simulation budget to keep it responsive and low-risk.
+
+2) Constrained decision layer
+- New module: v241_refactor_app/analysis_lab.py
+- Adds build_decision_policy_analysis(...)
+- Compares safe policy variants that already exist in the engine:
+  - Current
+  - Spend -10%
+  - Spend -20%
+  - Dividend First withdrawal mode
+  - Threshold Band rebalancing
+  - Annual rebalancing
+- Ranks candidates by user objective:
+  - Minimize failure rate
+  - Maximize downside resilience
+  - Balanced robustness
+  - Maximize legacy
+- Produces:
+  - policy_df: ranked candidate table
+  - recommendation_df: compact recommendation summary
+  - recommendation_text: human-readable recommendation string
+- Again this is an overlay on top of the existing engine; no new monthly cashflow logic was introduced.
+
+3) Constrained forward assumptions layer
+- Extended v241_refactor_app/monte_carlo.py
+- Added a new forward mode: Bucket CMA Targets
+- This mode preserves bootstrap path structure but lets the user set transparent bucket-level capital market assumptions:
+  - Defensive target return + vol multiplier
+  - Core target return + vol multiplier
+  - Aggressive target return + vol multiplier
+  - Crypto target return + vol multiplier
+- Existing historical bucket classification logic is reused:
+  - stock-like assets are split by realized volatility into defensive/core/aggressive buckets
+  - crypto stays crypto
+- Added build_forward_assumption_audit(...)
+  - shows ticker, bucket assignment, historical annual return, target annual return, applied vol multiplier, dividend multiplier, and forward mode
+
+UI changes
+- app.py now includes a new Decision Lab tab
+- Inside it:
+  - Forward Assumption Audit section
+  - Fragility subtab with a Build fragility layer button
+  - Decision Engine subtab with objective selector + Run decision engine button
+- Monte Carlo settings now include Bucket CMA Targets and the new bucket-level assumption controls.
+
+Model changes
+- Added PortfolioInputs fields for Bucket CMA Targets settings:
+  - monte_carlo_bucket_cma_defensive_return_pct
+  - monte_carlo_bucket_cma_core_return_pct
+  - monte_carlo_bucket_cma_aggressive_return_pct
+  - monte_carlo_bucket_cma_crypto_return_pct
+  - monte_carlo_bucket_cma_defensive_vol_multiplier
+  - monte_carlo_bucket_cma_core_vol_multiplier
+  - monte_carlo_bucket_cma_aggressive_vol_multiplier
+  - monte_carlo_bucket_cma_crypto_vol_multiplier
+- Defaults were added in models.py so old paths remain compatible.
+
+Caching / architecture
+- Added cached orchestration wrappers:
+  - build_fragility_artifacts_cached(...)
+  - build_decision_artifacts_cached(...)
+  - build_forward_assumption_audit_cached(...)
+- These live in orchestration.py and keep the heavy work separated from core render flow.
+- The app still renders historical results first, and the new analysis layers remain on-demand.
+
+Why this was kept low-risk
+- No change to the historical engine’s monthly accounting semantics
+- No change to the MC path kernel’s withdrawal / rebalance / fee / tax mechanics
+- No change to the benchmark engine behavior
+- New features are wrappers, rankings, audits, and overlays around stable existing functions
+
+Validation completed
+- Python compilation passed for the app package
+- Test suite now passes with 12 tests total
+- Added new tests for:
+  - Bucket CMA target mode behavior
+  - Fragility layer output creation
+  - Decision engine ranking output
+
+Files materially changed
+- v241_refactor_app/app.py
+- v241_refactor_app/models.py
+- v241_refactor_app/monte_carlo.py
+- v241_refactor_app/orchestration.py
+- v241_refactor_app/state.py
+- v241_refactor_app/analysis_lab.py (new)
+- tests/test_minimal_suite.py
+
+Important limitation
+- This is intentionally still a constrained version of #3 / #5 / #4.
+- It does not add account-aware tax logic, household liability modeling, or new dynamic withdrawal-rule mechanics.
+- It is designed to improve decision usefulness without destabilizing the engine.

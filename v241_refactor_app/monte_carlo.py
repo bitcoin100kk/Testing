@@ -255,6 +255,8 @@ class MonteCarloForwardSpec:
     aggressive_extra_haircut_pct: float
     crypto_extra_haircut_pct: float
     dividend_multiplier: float
+    target_return_by_bucket: Optional[Dict[str, float]] = None
+    vol_multiplier_by_bucket: Optional[Dict[str, float]] = None
 
 
 def _effective_forward_spec(portfolio_inputs: PortfolioInputs) -> MonteCarloForwardSpec:
@@ -288,6 +290,28 @@ def _effective_forward_spec(portfolio_inputs: PortfolioInputs) -> MonteCarloForw
             dividend_multiplier=0.70,
         ),
     }
+    if mode == "Bucket CMA Targets":
+        return MonteCarloForwardSpec(
+            mode="Bucket CMA Targets",
+            return_haircut_pct=0.0,
+            return_shift_pct=0.0,
+            vol_multiplier=1.0,
+            aggressive_extra_haircut_pct=0.0,
+            crypto_extra_haircut_pct=0.0,
+            dividend_multiplier=float(getattr(portfolio_inputs, "monte_carlo_dividend_multiplier", 1.0)),
+            target_return_by_bucket={
+                "defensive": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_defensive_return_pct", 4.0)),
+                "core": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_core_return_pct", 6.0)),
+                "aggressive": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_aggressive_return_pct", 8.0)),
+                "crypto": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_crypto_return_pct", 12.0)),
+            },
+            vol_multiplier_by_bucket={
+                "defensive": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_defensive_vol_multiplier", 0.90)),
+                "core": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_core_vol_multiplier", 1.00)),
+                "aggressive": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_aggressive_vol_multiplier", 1.10)),
+                "crypto": float(getattr(portfolio_inputs, "monte_carlo_bucket_cma_crypto_vol_multiplier", 1.25)),
+            },
+        )
     if mode != "Custom Forward Stress":
         return presets.get(mode, presets["Historical Base"])
     return MonteCarloForwardSpec(
@@ -363,14 +387,74 @@ def _apply_forward_overlay(
 
         hist_monthly_mu = float(hist_mu[j])
         hist_annual = ((1.0 + (hist_monthly_mu / 100.0)) ** 12 - 1.0) * 100.0
-        target_annual = (hist_annual * (1.0 - (total_haircut / 100.0))) + float(forward_spec.return_shift_pct)
+        if forward_spec.target_return_by_bucket and bucket in forward_spec.target_return_by_bucket:
+            target_annual = float(forward_spec.target_return_by_bucket[bucket])
+        else:
+            target_annual = (hist_annual * (1.0 - (total_haircut / 100.0))) + float(forward_spec.return_shift_pct)
         target_monthly_mu = _monthly_target_from_annual_pct(target_annual)
         centered = returns_adj[:, j] - hist_monthly_mu
-        returns_adj[:, j] = target_monthly_mu + (centered * float(forward_spec.vol_multiplier))
+        bucket_vol = float(forward_spec.vol_multiplier_by_bucket.get(bucket, forward_spec.vol_multiplier)) if forward_spec.vol_multiplier_by_bucket else float(forward_spec.vol_multiplier)
+        returns_adj[:, j] = target_monthly_mu + (centered * bucket_vol)
 
     returns_adj = np.clip(returns_adj, -99.999, None)
     dividends_adj = np.clip(dividends_adj * float(forward_spec.dividend_multiplier), 0.0, None)
     return returns_adj, dividends_adj
+
+
+
+
+def build_forward_assumption_audit(
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    historical_returns_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if historical_returns_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Ticker",
+                "Asset Type",
+                "Forward Bucket",
+                "Historical Annual Return (%)",
+                "Historical Monthly Vol (%)",
+                "Target Annual Return (%)",
+                "Applied Vol Multiplier",
+                "Dividend Multiplier",
+                "Forward Mode",
+            ]
+        )
+
+    forward_spec = _effective_forward_spec(portfolio_inputs)
+    bucket_map = _classify_forward_buckets(historical_returns_df, assets)
+    hist_mu = historical_returns_df.mean(axis=0)
+    hist_vol = historical_returns_df.std(axis=0, ddof=0)
+
+    rows = []
+    for asset in assets:
+        hist_monthly_mu = float(hist_mu.get(asset.ticker, 0.0))
+        hist_annual = ((1.0 + (hist_monthly_mu / 100.0)) ** 12 - 1.0) * 100.0
+        bucket = bucket_map.get(asset.ticker, "core")
+        if forward_spec.target_return_by_bucket and bucket in forward_spec.target_return_by_bucket:
+            target_annual = float(forward_spec.target_return_by_bucket[bucket])
+        else:
+            bucket_extra = forward_spec.aggressive_extra_haircut_pct if bucket == "aggressive" else 0.0
+            crypto_extra = forward_spec.crypto_extra_haircut_pct if bucket == "crypto" else 0.0
+            total_haircut = min(max(forward_spec.return_haircut_pct + bucket_extra + crypto_extra, 0.0), 100.0)
+            target_annual = (hist_annual * (1.0 - (total_haircut / 100.0))) + float(forward_spec.return_shift_pct)
+        bucket_vol = float(forward_spec.vol_multiplier_by_bucket.get(bucket, forward_spec.vol_multiplier)) if forward_spec.vol_multiplier_by_bucket else float(forward_spec.vol_multiplier)
+        rows.append(
+            {
+                "Ticker": asset.ticker,
+                "Asset Type": str(asset.asset_type),
+                "Forward Bucket": bucket.title(),
+                "Historical Annual Return (%)": hist_annual,
+                "Historical Monthly Vol (%)": float(hist_vol.get(asset.ticker, 0.0)),
+                "Target Annual Return (%)": float(target_annual),
+                "Applied Vol Multiplier": bucket_vol,
+                "Dividend Multiplier": float(forward_spec.dividend_multiplier),
+                "Forward Mode": str(forward_spec.mode),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def simulate_monte_carlo(
