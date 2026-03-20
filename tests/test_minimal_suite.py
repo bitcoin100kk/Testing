@@ -561,3 +561,121 @@ def test_asset_matrix_diagnostics_surface_fallback_and_dividend_filters(monkeypa
     assert "Data Source" in diagnostics_df.columns
     assert bool(diagnostics_df.loc[diagnostics_df["Ticker"] == "BTC", "Fallback Used"].iloc[0]) is True
     assert int(diagnostics_df.loc[diagnostics_df["Ticker"] == "AAA", "Filtered Dividend Events"].iloc[0]) == 2
+
+
+
+def test_export_workbook_includes_decision_lab_and_provenance_sheets(base_inputs, base_assets, base_dataset):
+    import io
+    from openpyxl import load_workbook
+
+    from v241_refactor_app.analysis_lab import build_decision_policy_analysis, build_fragility_analysis
+    from v241_refactor_app.analytics import compute_risk_metrics, compute_summary_metrics
+    from v241_refactor_app.orchestration import build_export_bytes_cached
+    from v241_refactor_app.utils import serialize_assets, serialize_portfolio_inputs
+
+    selection = run_historical_simulation(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+    fragility_outputs = build_fragility_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+    decision_outputs = build_decision_policy_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+        objective="Balanced robustness",
+    )
+    metrics = compute_summary_metrics(selection.results_df, selection.filtered_periods)
+    risk_metrics = compute_risk_metrics(selection.results_df)
+    risk_table = pd.DataFrame({"Metric": list(risk_metrics.keys()), "Value": list(risk_metrics.values())})
+    diagnostics_df = pd.DataFrame([
+        {
+            "Ticker": "AAA",
+            "Data Source": "stock_api",
+            "Filtered Dividend Events": 0,
+            "Clipped Dividend Months": 0,
+            "Fallback Used": False,
+            "Fallback Reason": "",
+            "Overlap Start": "2020-01",
+            "Overlap End": "2021-12",
+            "Overlap Months": 24,
+        }
+    ])
+
+    workbook_bytes = build_export_bytes_cached(
+        portfolio_input_dict=serialize_portfolio_inputs(base_inputs),
+        asset_specs=serialize_assets(base_assets),
+        year_range=(2020, 2021),
+        results_df=selection.results_df,
+        component_df=selection.component_df,
+        selected_returns_df=selection.selected_returns_df,
+        selected_divs_df=selection.selected_divs_df,
+        weighted_returns=selection.weighted_returns,
+        weighted_divs=selection.weighted_divs,
+        metrics=metrics,
+        diagnostics_df=diagnostics_df,
+        risk_table=risk_table,
+        fragility_df=fragility_outputs["fragility_df"],
+        fragility_pivot_df=fragility_outputs["fragility_pivot_df"],
+        policy_df=decision_outputs["policy_df"],
+        recommendation_df=decision_outputs["recommendation_df"],
+        decision_objective="Balanced robustness",
+    )
+
+    wb = load_workbook(io.BytesIO(workbook_bytes), read_only=True)
+    sheet_names = set(wb.sheetnames)
+    expected = {
+        "Run Provenance",
+        "Forward Audit",
+        "Decision Lab Settings",
+        "Fragility Summary",
+        "Fragility Matrix",
+        "Policy Comparison",
+        "Policy Recommendation",
+    }
+    assert expected.issubset(sheet_names)
+
+
+
+def test_export_signature_changes_when_decision_lab_state_changes():
+    from v241_refactor_app.app import _export_signature
+
+    base = _export_signature(
+        active_core_signature="core",
+        year_range=(2020, 2021),
+        benchmark_signature=None,
+        mc_signature=None,
+        scenario_signature=None,
+        fragility_signature=None,
+        decision_signature=None,
+    )
+    with_fragility = _export_signature(
+        active_core_signature="core",
+        year_range=(2020, 2021),
+        benchmark_signature=None,
+        mc_signature=None,
+        scenario_signature=None,
+        fragility_signature="frag-a",
+        decision_signature=None,
+    )
+    with_decision = _export_signature(
+        active_core_signature="core",
+        year_range=(2020, 2021),
+        benchmark_signature=None,
+        mc_signature=None,
+        scenario_signature=None,
+        fragility_signature="frag-a",
+        decision_signature="decision-b",
+    )
+
+    assert base != with_fragility
+    assert with_fragility != with_decision

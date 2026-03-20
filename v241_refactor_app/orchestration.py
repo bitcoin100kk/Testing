@@ -392,9 +392,19 @@ def build_export_bytes_cached(
     mc_paths_df: Optional[pd.DataFrame] = None,
     mc_convergence_df: Optional[pd.DataFrame] = None,
     scenario_comparison_df: Optional[pd.DataFrame] = None,
+    fragility_df: Optional[pd.DataFrame] = None,
+    fragility_pivot_df: Optional[pd.DataFrame] = None,
+    policy_df: Optional[pd.DataFrame] = None,
+    recommendation_df: Optional[pd.DataFrame] = None,
+    decision_objective: Optional[str] = None,
 ) -> bytes:
     portfolio_inputs = deserialize_portfolio_inputs(portfolio_input_dict)
     assets = deserialize_assets(asset_specs)
+    forward_audit_df = build_forward_assumption_audit(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=selected_returns_df,
+    )
     return export_full_simulation_workbook(
         results_df=results_df,
         component_df=component_df,
@@ -417,6 +427,12 @@ def build_export_bytes_cached(
         mc_paths_df=mc_paths_df,
         mc_convergence_df=mc_convergence_df,
         scenario_comparison_df=scenario_comparison_df,
+        forward_audit_df=forward_audit_df if forward_audit_df is not None and not forward_audit_df.empty else None,
+        fragility_df=fragility_df if fragility_df is not None and not fragility_df.empty else None,
+        fragility_pivot_df=fragility_pivot_df if fragility_pivot_df is not None and not fragility_pivot_df.empty else None,
+        policy_df=policy_df if policy_df is not None and not policy_df.empty else None,
+        recommendation_df=recommendation_df if recommendation_df is not None and not recommendation_df.empty else None,
+        decision_objective=decision_objective,
     )
 
 

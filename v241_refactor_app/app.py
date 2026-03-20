@@ -227,6 +227,8 @@ def _export_signature(
     benchmark_signature: str | None,
     mc_signature: str | None,
     scenario_signature: str | None,
+    fragility_signature: str | None = None,
+    decision_signature: str | None = None,
 ) -> str:
     return build_raw_signature(
         {
@@ -236,6 +238,8 @@ def _export_signature(
             "benchmark_signature": benchmark_signature,
             "mc_signature": mc_signature,
             "scenario_signature": scenario_signature,
+            "fragility_signature": fragility_signature,
+            "decision_signature": decision_signature,
         }
     )
 
@@ -940,6 +944,8 @@ def main() -> None:
             benchmark_signature=benchmark_signature if (benchmark_results_df is not None or benchmark_comparison_df is not None or benchmark_summary_table is not None) else None,
             mc_signature=mc_signature if (mc_percentiles is not None and mc_summary is not None) else None,
             scenario_signature=scenario_signature if scenario_comparison_df is not None else None,
+            fragility_signature=fragility_signature if isinstance(get_bucket_artifact("fragility", fragility_signature), dict) else None,
+            decision_signature=decision_signature if isinstance(get_bucket_artifact("decision", decision_signature), dict) else None,
         )
         export_bytes = get_bucket_artifact("export", export_signature)
 
@@ -948,7 +954,7 @@ def main() -> None:
         )
         if export_bytes is None:
             st.caption(
-                "Prepare the workbook on demand. It reuses cached historical results and only adds optional sheets for benchmark, scenario comparison, and Monte Carlo if those outputs have been prepared for this run."
+                "Prepare the workbook on demand. It reuses cached historical results and adds optional sheets for benchmark, scenario comparison, Monte Carlo, forward assumptions, fragility, policy comparison, and run provenance when those artifacts are available for this run."
             )
 
         if prepare_export_now:
@@ -985,12 +991,37 @@ def main() -> None:
                     mc_convergence = mc_outputs.get("convergence_df")
                     store_bucket_artifact("mc", mc_signature, mc_outputs)
 
+                fragility_outputs = get_bucket_artifact("fragility", fragility_signature)
+                if not isinstance(fragility_outputs, dict):
+                    fragility_outputs = orch.build_fragility_artifacts_cached(
+                        portfolio_input_dict=active_snapshot.portfolio_inputs,
+                        asset_specs=orch.snapshot_asset_specs(active_snapshot),
+                        selected_returns_df=core_artifacts.selection.selected_returns_df,
+                        selected_divs_df=core_artifacts.selection.selected_divs_df,
+                        start_period=core_artifacts.selection.filtered_periods[0],
+                    )
+                    store_bucket_artifact("fragility", fragility_signature, fragility_outputs)
+
+                decision_outputs = get_bucket_artifact("decision", decision_signature)
+                if not isinstance(decision_outputs, dict):
+                    decision_outputs = orch.build_decision_artifacts_cached(
+                        portfolio_input_dict=active_snapshot.portfolio_inputs,
+                        asset_specs=orch.snapshot_asset_specs(active_snapshot),
+                        selected_returns_df=core_artifacts.selection.selected_returns_df,
+                        selected_divs_df=core_artifacts.selection.selected_divs_df,
+                        start_period=core_artifacts.selection.filtered_periods[0],
+                        objective=decision_objective,
+                    )
+                    store_bucket_artifact("decision", decision_signature, decision_outputs)
+
                 export_signature = _export_signature(
                     active_core_signature=active_core_signature,
                     year_range=year_range,
                     benchmark_signature=benchmark_signature if (benchmark_results_df is not None or benchmark_comparison_df is not None or benchmark_summary_table is not None) else None,
                     mc_signature=mc_signature if (mc_percentiles is not None and mc_summary is not None) else None,
                     scenario_signature=scenario_signature if scenario_comparison_df is not None else None,
+                    fragility_signature=fragility_signature if isinstance(fragility_outputs, dict) else None,
+                    decision_signature=decision_signature if isinstance(decision_outputs, dict) else None,
                 )
                 export_bytes = get_bucket_artifact("export", export_signature)
                 if export_bytes is None:
@@ -1016,6 +1047,11 @@ def main() -> None:
                         mc_paths_df=mc_paths,
                         mc_convergence_df=mc_convergence,
                         scenario_comparison_df=scenario_comparison_df,
+                        fragility_df=fragility_outputs.get("fragility_df") if isinstance(fragility_outputs, dict) else None,
+                        fragility_pivot_df=fragility_outputs.get("fragility_pivot_df") if isinstance(fragility_outputs, dict) else None,
+                        policy_df=decision_outputs.get("policy_df") if isinstance(decision_outputs, dict) else None,
+                        recommendation_df=decision_outputs.get("recommendation_df") if isinstance(decision_outputs, dict) else None,
+                        decision_objective=decision_objective,
                     )
                     store_bucket_artifact("export", export_signature, export_bytes)
 
