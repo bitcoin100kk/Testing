@@ -9,7 +9,7 @@ DEFAULT_START_DATE = "1990-01-01"
 CACHE_TTL_SECONDS = 3600
 MAX_SCENARIOS = 8
 
-APP_TITLE = "Interactive Investment Balance Calculator"
+APP_TITLE = "Retirement Portfolio Strategy Lab"
 APP_CAPTION = (
     "Upgraded for fully monthly simulation, asset-aware + AUM-aware trading frictions, "
     "multivariate block-bootstrap Monte Carlo, and convergence diagnostics."
