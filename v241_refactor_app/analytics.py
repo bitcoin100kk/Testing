@@ -93,7 +93,7 @@ def compute_summary_metrics(results_df: pd.DataFrame, periods: Sequence[pd.Times
         return {}
     monthly_returns = pd.to_numeric(results_df["Portfolio Total Return (%)"], errors="coerce").dropna() / 100.0
     n_periods = max(len(monthly_returns), 1)
-    years_simulated = len(results_df) / 12.0
+    years_simulated = (len(periods) / 12.0) if periods else (len(results_df) / 12.0)
     if n_periods > 0 and (1.0 + monthly_returns).gt(0).all():
         cagr = (np.prod(1.0 + monthly_returns.to_numpy()) ** (12.0 / n_periods) - 1.0) * 100.0
     else:

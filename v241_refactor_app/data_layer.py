@@ -27,7 +27,7 @@ def fetch_with_retry(url: str, params: Dict[str, str], max_attempts: int = 3) ->
             if response.status_code == 200:
                 return response.json()
             raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
-        except Exception as exc:  # noqa: BLE001
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
             last_err = exc
             if attempt < max_attempts - 1:
                 time.sleep(2**attempt)
@@ -83,6 +83,7 @@ def _build_monthly_stock_history_from_daily(df: pd.DataFrame, ticker: str) -> pd
     prev_raw_close = daily["raw_close"].shift(1)
     daily_dividend_yield = (daily["divCash"] / prev_raw_close.where(prev_raw_close > 0)).replace([np.inf, -np.inf], np.nan)
     suspicious_dividend_event = (daily["splitFactor"].sub(1.0).abs() > 1e-9) | daily_dividend_yield.abs().gt(0.10)
+    filtered_event_count = int(suspicious_dividend_event.fillna(False).sum())
     daily["filtered_divCash"] = daily["divCash"].where(~suspicious_dividend_event, 0.0)
 
     monthly = daily.resample("ME").agg({"adj_price": "last", "raw_close": "last", "filtered_divCash": "sum"})
@@ -90,15 +91,18 @@ def _build_monthly_stock_history_from_daily(df: pd.DataFrame, ticker: str) -> pd
     monthly["dividend_yield"] = (
         monthly["filtered_divCash"] / monthly["raw_close"].shift(1).where(monthly["raw_close"].shift(1) > 0)
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    clipped_months = int(monthly["dividend_yield"].abs().gt(0.10).sum())
     monthly.loc[monthly["dividend_yield"].abs() > 0.10, "dividend_yield"] = 0.0
     monthly["price_return"] = ((1.0 + monthly["total_return"]) / (1.0 + monthly["dividend_yield"].clip(lower=-0.99))) - 1.0
     monthly["price_return"] = monthly["price_return"].replace([np.inf, -np.inf], np.nan)
     monthly["price_return"] = monthly["price_return"].fillna(monthly["total_return"])
-    return _clean_monthly_history(monthly[["price_return", "dividend_yield"]], ticker)
+    cleaned = _clean_monthly_history(monthly[["price_return", "dividend_yield"]], ticker)
+    cleaned.attrs["filtered_dividend_events"] = filtered_event_count
+    cleaned.attrs["clipped_dividend_months"] = clipped_months
+    return cleaned
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def get_stock_data(ticker: str, token: str) -> Tuple[pd.Series, pd.Series, List[int]]:
+def _get_stock_data_with_metadata(ticker: str, token: str) -> Tuple[pd.Series, pd.Series, List[int], Dict[str, object]]:
     ticker = normalize_ticker(ticker)
     params = {
         "token": token,
@@ -113,7 +117,20 @@ def get_stock_data(ticker: str, token: str) -> Tuple[pd.Series, pd.Series, List[
     df = pd.DataFrame(data)
     monthly = _build_monthly_stock_history_from_daily(df, ticker)
     years = sorted(monthly.index.year.unique().tolist())
-    return monthly["price_return"] * 100.0, monthly["dividend_yield"] * 100.0, years
+    metadata = {
+        "data_source": "stock_api",
+        "filtered_dividend_events": int(monthly.attrs.get("filtered_dividend_events", 0)),
+        "clipped_dividend_months": int(monthly.attrs.get("clipped_dividend_months", 0)),
+        "fallback_used": False,
+        "fallback_reason": "",
+    }
+    return monthly["price_return"] * 100.0, monthly["dividend_yield"] * 100.0, years, metadata
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_stock_data(ticker: str, token: str) -> Tuple[pd.Series, pd.Series, List[int]]:
+    price_returns, dividend_yields, years, _ = _get_stock_data_with_metadata(ticker, token)
+    return price_returns, dividend_yields, years
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
@@ -122,8 +139,7 @@ def _get_stock_like_crypto_fallback(ticker: str, token: str) -> Tuple[pd.Series,
     return price_returns, years
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def get_crypto_data(ticker: str, token: str) -> Tuple[pd.Series, List[int]]:
+def _get_crypto_data_with_metadata(ticker: str, token: str) -> Tuple[pd.Series, List[int], Dict[str, object]]:
     ticker = normalize_ticker(ticker)
     crypto_result = None
     crypto_err = None
@@ -155,13 +171,24 @@ def get_crypto_data(ticker: str, token: str) -> Tuple[pd.Series, List[int]]:
         monthly["dividend_yield"] = 0.0
         monthly = _clean_monthly_history(monthly[["price_return", "dividend_yield"]], ticker)
         years = sorted(monthly.index.year.unique().tolist())
-        crypto_result = (monthly["price_return"] * 100.0, years)
+        crypto_result = (monthly["price_return"] * 100.0, years, {"data_source": "crypto_api", "fallback_used": False, "fallback_reason": ""})
     except Exception as exc:  # noqa: BLE001
         crypto_err = str(exc)
 
     stock_like_result = None
     try:
-        stock_like_result = _get_stock_like_crypto_fallback(ticker, token)
+        stock_price_returns, _stock_dividend_yields, stock_years, stock_meta = _get_stock_data_with_metadata(ticker, token)
+        stock_like_result = (
+            stock_price_returns,
+            stock_years,
+            {
+                "data_source": "stock_api_fallback",
+                "fallback_used": True,
+                "fallback_reason": crypto_err or "crypto endpoint unavailable",
+                "filtered_dividend_events": int(stock_meta.get("filtered_dividend_events", 0)),
+                "clipped_dividend_months": int(stock_meta.get("clipped_dividend_months", 0)),
+            },
+        )
     except Exception:
         stock_like_result = None
 
@@ -176,6 +203,12 @@ def get_crypto_data(ticker: str, token: str) -> Tuple[pd.Series, List[int]]:
     raise ValueError(crypto_err or f"No usable crypto history returned for '{ticker}'.")
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_crypto_data(ticker: str, token: str) -> Tuple[pd.Series, List[int]]:
+    price_returns, years, _ = _get_crypto_data_with_metadata(ticker, token)
+    return price_returns, years
+
+
 def build_asset_matrices(
     assets: Sequence[AssetConfig],
     token: str,
@@ -188,10 +221,10 @@ def build_asset_matrices(
 
     for asset in assets:
         if asset.asset_type == "Crypto":
-            price_returns, _years = get_crypto_data(asset.ticker, token)
+            price_returns, _years, asset_metadata = _get_crypto_data_with_metadata(asset.ticker, token)
             dividend_yields = pd.Series(0.0, index=price_returns.index)
         else:
-            price_returns, dividend_yields, _years = get_stock_data(asset.ticker, token)
+            price_returns, dividend_yields, _years, asset_metadata = _get_stock_data_with_metadata(asset.ticker, token)
 
         price_returns = _safe_numeric_series(price_returns).dropna().astype(float)
         dividend_yields = _safe_numeric_series(dividend_yields).reindex(price_returns.index).fillna(0.0).astype(float)
@@ -210,6 +243,11 @@ def build_asset_matrices(
                 "First Month": asset_index.min().strftime("%Y-%m"),
                 "Last Month": asset_index.max().strftime("%Y-%m"),
                 "Monthly Points": int(len(asset_index)),
+                "Data Source": str(asset_metadata.get("data_source", asset.asset_type.lower())),
+                "Filtered Dividend Events": int(asset_metadata.get("filtered_dividend_events", 0)),
+                "Clipped Dividend Months": int(asset_metadata.get("clipped_dividend_months", 0)),
+                "Fallback Used": bool(asset_metadata.get("fallback_used", False)),
+                "Fallback Reason": str(asset_metadata.get("fallback_reason", "")),
             }
         )
 

@@ -1,10 +1,7 @@
 import os
 import streamlit as st
 
-DEFAULT_TIINGO_API_TOKEN = os.getenv(
-    "TIINGO_API_TOKEN",
-    "ea59607dd8ff30a1493d798ce53e515a547c9b63",
-)
+DEFAULT_TIINGO_API_TOKEN = os.getenv("TIINGO_API_TOKEN", "")
 BASE_STOCK_URL = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
 BASE_CRYPTO_URL = "https://api.tiingo.com/tiingo/crypto/prices"
 HEADERS = {"Content-Type": "application/json"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -128,12 +129,20 @@ def build_forward_assumption_audit_cached(
     )
 
 
-def make_run_snapshot(portfolio_inputs: PortfolioInputs, assets: Sequence[AssetConfig], token: str, raw_signature: str) -> RunSnapshot:
+def make_run_snapshot(
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    token: str,
+    raw_signature: str,
+    *,
+    ui_preferences: Dict[str, object] | None = None,
+) -> RunSnapshot:
     return RunSnapshot(
         portfolio_inputs=serialize_portfolio_inputs(portfolio_inputs),
         assets=[asdict(asset) for asset in assets],
         token=token,
         raw_signature=raw_signature,
+        ui_preferences=dict(ui_preferences or {}),
     )
 
 
@@ -150,7 +159,7 @@ def snapshot_asset_specs(snapshot: RunSnapshot) -> Tuple[Tuple[str, float, str],
 
 
 def snapshot_core_signature(snapshot: RunSnapshot) -> str:
-    return build_core_signature(snapshot.portfolio_inputs, snapshot_asset_specs(snapshot), snapshot.token)
+    return build_core_signature(snapshot.portfolio_inputs, snapshot_asset_specs(snapshot))
 
 
 def build_risk_table(metrics: Dict[str, float]) -> pd.DataFrame:
@@ -262,7 +271,13 @@ def build_benchmark_package(
     if comparison.empty:
         return benchmark_results, None, None
     comparison["Excess Return (%)"] = comparison["Portfolio Total Return (%)"] - comparison["Benchmark Total Return (%)"]
-    comparison["Relative Wealth (%)"] = ((comparison["Balance (USD)"] / comparison["Benchmark Balance (USD)"]) - 1.0) * 100.0
+    benchmark_balance = pd.to_numeric(comparison["Benchmark Balance (USD)"], errors="coerce")
+    portfolio_balance = pd.to_numeric(comparison["Balance (USD)"], errors="coerce")
+    comparison["Relative Wealth (%)"] = np.where(
+        benchmark_balance.ne(0.0),
+        ((portfolio_balance / benchmark_balance) - 1.0) * 100.0,
+        float("nan"),
+    )
     benchmark_metrics = compute_summary_metrics(benchmark_results, benchmark_selection.filtered_periods)
     summary_table = pd.DataFrame(
         {

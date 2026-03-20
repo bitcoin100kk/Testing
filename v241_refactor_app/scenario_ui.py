@@ -70,10 +70,20 @@ def load_saved_scenario(name: str) -> None:
     year_range = cfg.get("year_range")
     if year_range:
         st.session_state["canonical_year_range"] = tuple(year_range)
+    ui_preferences = cfg.get("ui_preferences", {})
+    if "display_real_dollars" in ui_preferences:
+        st.session_state["display_real_dollars"] = bool(ui_preferences["display_real_dollars"])
     st.rerun()
 
 
-def save_current_scenario(name: str, portfolio_inputs: PortfolioInputs, assets: Sequence[AssetConfig], year_range: Tuple[int, int]) -> None:
+def save_current_scenario(
+    name: str,
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    year_range: Tuple[int, int],
+    *,
+    ui_preferences: Dict[str, object] | None = None,
+) -> None:
     if not name.strip():
         raise ValueError("Enter a scenario name before saving.")
     scenarios = st.session_state.get("saved_scenarios", {})
@@ -83,6 +93,7 @@ def save_current_scenario(name: str, portfolio_inputs: PortfolioInputs, assets: 
         "inputs": {**asdict(portfolio_inputs)},
         "assets": [asdict(asset) for asset in assets],
         "year_range": list(year_range),
+        "ui_preferences": dict(ui_preferences or {}),
     }
     st.session_state["saved_scenarios"] = scenarios
 

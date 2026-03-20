@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -26,6 +26,17 @@ def _allocate_cashflow_proportionally(
 
 def _portfolio_total(balances: Dict[str, float]) -> float:
     return float(sum(max(v, 0.0) for v in balances.values()))
+
+def _withdrawal_tax_rate(portfolio_inputs: PortfolioInputs) -> float:
+    return min(max(float(portfolio_inputs.tax_rate_withdrawals) / 100.0, 0.0), 0.999999)
+
+
+def _gross_needed_for_net_withdrawal(net_amount: float, portfolio_inputs: PortfolioInputs) -> float:
+    net_amount = max(float(net_amount), 0.0)
+    if net_amount <= 0.0:
+        return 0.0
+    return net_amount / (1.0 - _withdrawal_tax_rate(portfolio_inputs))
+
 
 def _weight_map(balances: Dict[str, float]) -> Dict[str, float]:
     total = _portfolio_total(balances)
@@ -411,19 +422,21 @@ def simulate_portfolio(
         dividend_tax = gross_dividend_usd * (portfolio_inputs.tax_rate_dividends / 100.0)
         net_dividend_usd = gross_dividend_usd - dividend_tax
 
+        dividend_cash_available_for_spending = 0.0 if portfolio_inputs.reinvest_dividends else net_dividend_usd
         if portfolio_inputs.withdrawal_mode == "Percent of Balance":
-            desired_gross_withdrawal = current_total_after_contrib * monthly_withdrawal_rate
+            target_net_cash_need = current_total_after_contrib * monthly_withdrawal_rate
         elif portfolio_inputs.withdrawal_mode == "Fixed Dollar":
-            desired_gross_withdrawal = fixed_monthly_withdrawal_base
+            target_net_cash_need = fixed_monthly_withdrawal_base
         elif portfolio_inputs.withdrawal_mode == "Inflation-Adjusted Dollar":
-            desired_gross_withdrawal = fixed_monthly_withdrawal_base * ((1.0 + monthly_inflation_rate) ** i)
+            target_net_cash_need = fixed_monthly_withdrawal_base * ((1.0 + monthly_inflation_rate) ** i)
         elif portfolio_inputs.withdrawal_mode == "Dividend First":
             target_cash_need = current_total_after_contrib * monthly_withdrawal_rate
-            desired_gross_withdrawal = max(target_cash_need - net_dividend_usd, 0.0)
+            target_net_cash_need = max(target_cash_need - dividend_cash_available_for_spending, 0.0)
         else:
             raise ValueError(f"Unsupported withdrawal mode: {portfolio_inputs.withdrawal_mode}")
 
-        balances, gross_withdrawal, withdrawal_trade_cost, withdrawal_shortfall = _apply_withdrawal_trade(
+        desired_gross_withdrawal = _gross_needed_for_net_withdrawal(target_net_cash_need, portfolio_inputs)
+        balances, gross_withdrawal, withdrawal_trade_cost, gross_withdrawal_shortfall = _apply_withdrawal_trade(
             balances=balances,
             desired_gross_amount=desired_gross_withdrawal,
             target_weights=target_weights,
@@ -432,8 +445,9 @@ def simulate_portfolio(
             portfolio_inputs=portfolio_inputs,
         )
         total_trading_cost_usd += withdrawal_trade_cost
-        withdrawal_tax = gross_withdrawal * (portfolio_inputs.tax_rate_withdrawals / 100.0)
+        withdrawal_tax = gross_withdrawal * _withdrawal_tax_rate(portfolio_inputs)
         net_cash_from_withdrawal = gross_withdrawal - withdrawal_tax
+        withdrawal_shortfall = max(target_net_cash_need - net_cash_from_withdrawal, 0.0)
 
         balances, _, did_rebalance_withdrawal, rebalance_cost_withdrawal, turnover_withdrawal = maybe_rebalance(
             balances,
@@ -517,12 +531,14 @@ def simulate_portfolio(
                 "Dividend Yield (USD)": net_dividend_usd,
                 "Dividend Reinvestment (USD)": dividend_reinvested_usd,
                 "Dividend Reinvestment Cost (USD)": dividend_reinvestment_cost,
-                "Withdrawal Target (USD)": desired_gross_withdrawal,
+                "Withdrawal Target (USD)": target_net_cash_need,
+                "Gross Withdrawal Target (USD)": desired_gross_withdrawal,
                 "Gross Withdrawal (USD)": gross_withdrawal,
                 "Withdrawal Trade Cost (USD)": withdrawal_trade_cost,
                 "Withdrawal Tax (USD)": withdrawal_tax,
                 "Withdrawal (USD)": net_cash_from_withdrawal,
                 "Withdrawal Shortfall (USD)": withdrawal_shortfall,
+                "Gross Withdrawal Shortfall (USD)": gross_withdrawal_shortfall,
                 "Fee (USD)": fee_usd,
                 "Trading Cost (USD)": total_trading_cost_usd,
                 "Turnover (%)": total_turnover_pct,

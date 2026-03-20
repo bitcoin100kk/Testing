@@ -325,6 +325,37 @@ def _effective_forward_spec(portfolio_inputs: PortfolioInputs) -> MonteCarloForw
     )
 
 
+def materialize_forward_assumption_overrides(portfolio_inputs: PortfolioInputs) -> Dict[str, object]:
+    forward_spec = _effective_forward_spec(portfolio_inputs)
+    overrides: Dict[str, object] = {
+        "monte_carlo_return_haircut_pct": float(forward_spec.return_haircut_pct),
+        "monte_carlo_return_shift_pct": float(forward_spec.return_shift_pct),
+        "monte_carlo_vol_multiplier": float(forward_spec.vol_multiplier),
+        "monte_carlo_growth_extra_haircut_pct": float(forward_spec.aggressive_extra_haircut_pct),
+        "monte_carlo_crypto_extra_haircut_pct": float(forward_spec.crypto_extra_haircut_pct),
+        "monte_carlo_dividend_multiplier": float(forward_spec.dividend_multiplier),
+    }
+    if forward_spec.target_return_by_bucket:
+        overrides.update(
+            {
+                "monte_carlo_bucket_cma_defensive_return_pct": float(forward_spec.target_return_by_bucket.get("defensive", getattr(portfolio_inputs, "monte_carlo_bucket_cma_defensive_return_pct", 4.0))),
+                "monte_carlo_bucket_cma_core_return_pct": float(forward_spec.target_return_by_bucket.get("core", getattr(portfolio_inputs, "monte_carlo_bucket_cma_core_return_pct", 6.0))),
+                "monte_carlo_bucket_cma_aggressive_return_pct": float(forward_spec.target_return_by_bucket.get("aggressive", getattr(portfolio_inputs, "monte_carlo_bucket_cma_aggressive_return_pct", 8.0))),
+                "monte_carlo_bucket_cma_crypto_return_pct": float(forward_spec.target_return_by_bucket.get("crypto", getattr(portfolio_inputs, "monte_carlo_bucket_cma_crypto_return_pct", 12.0))),
+            }
+        )
+    if forward_spec.vol_multiplier_by_bucket:
+        overrides.update(
+            {
+                "monte_carlo_bucket_cma_defensive_vol_multiplier": float(forward_spec.vol_multiplier_by_bucket.get("defensive", getattr(portfolio_inputs, "monte_carlo_bucket_cma_defensive_vol_multiplier", 0.90))),
+                "monte_carlo_bucket_cma_core_vol_multiplier": float(forward_spec.vol_multiplier_by_bucket.get("core", getattr(portfolio_inputs, "monte_carlo_bucket_cma_core_vol_multiplier", 1.00))),
+                "monte_carlo_bucket_cma_aggressive_vol_multiplier": float(forward_spec.vol_multiplier_by_bucket.get("aggressive", getattr(portfolio_inputs, "monte_carlo_bucket_cma_aggressive_vol_multiplier", 1.10))),
+                "monte_carlo_bucket_cma_crypto_vol_multiplier": float(forward_spec.vol_multiplier_by_bucket.get("crypto", getattr(portfolio_inputs, "monte_carlo_bucket_cma_crypto_vol_multiplier", 1.25))),
+            }
+        )
+    return overrides
+
+
 def _classify_forward_buckets(
     historical_returns_df: pd.DataFrame,
     assets: Sequence[AssetConfig],
@@ -333,28 +364,26 @@ def _classify_forward_buckets(
     bucket_map = {ticker: "core" for ticker in tickers}
 
     for asset in assets:
-        if str(asset.asset_type) == "Crypto":
+        asset_type = str(asset.asset_type)
+        if asset_type == "Crypto":
             bucket_map[asset.ticker] = "crypto"
-
-    stock_like = [asset.ticker for asset in assets if str(asset.asset_type) != "Crypto" and asset.ticker in historical_returns_df.columns]
-    if not stock_like:
-        return bucket_map
-
-    vol = historical_returns_df[stock_like].std(axis=0, ddof=0).fillna(0.0).sort_values()
-    ordered = list(vol.index)
-    if len(ordered) == 1:
-        return bucket_map
-
-    low_count = max(1, len(ordered) // 3)
-    high_count = max(1, len(ordered) // 3)
-    low_bucket = set(ordered[:low_count])
-    high_bucket = set(ordered[-high_count:])
-
-    for ticker in low_bucket - high_bucket:
-        bucket_map[ticker] = "defensive"
-    for ticker in high_bucket:
-        bucket_map[ticker] = "aggressive"
+            continue
+        if asset_type in {"Bond", "Treasury", "Cash", "TIPS"}:
+            bucket_map[asset.ticker] = "defensive"
+            continue
+        if asset.ticker not in historical_returns_df.columns:
+            continue
+        monthly_vol = float(pd.to_numeric(historical_returns_df[asset.ticker], errors="coerce").std(ddof=0))
+        annualized_vol = monthly_vol * math.sqrt(12.0)
+        bucket_map[asset.ticker] = "aggressive" if annualized_vol >= 18.0 else "core"
     return bucket_map
+
+
+def _annualized_geometric_return_pct(monthly_series: pd.Series) -> float:
+    monthly = pd.to_numeric(monthly_series, errors="coerce").dropna().astype(float) / 100.0
+    if monthly.empty or not (1.0 + monthly).gt(0.0).all():
+        return float("nan")
+    return float((np.prod(1.0 + monthly.to_numpy(dtype=float)) ** (12.0 / len(monthly)) - 1.0) * 100.0)
 
 
 def _monthly_target_from_annual_pct(annual_pct: float) -> float:
@@ -431,7 +460,7 @@ def build_forward_assumption_audit(
     rows = []
     for asset in assets:
         hist_monthly_mu = float(hist_mu.get(asset.ticker, 0.0))
-        hist_annual = ((1.0 + (hist_monthly_mu / 100.0)) ** 12 - 1.0) * 100.0
+        hist_annual = _annualized_geometric_return_pct(historical_returns_df.get(asset.ticker, pd.Series(dtype=float)))
         bucket = bucket_map.get(asset.ticker, "core")
         if forward_spec.target_return_by_bucket and bucket in forward_spec.target_return_by_bucket:
             target_annual = float(forward_spec.target_return_by_bucket[bucket])
@@ -446,7 +475,7 @@ def build_forward_assumption_audit(
                 "Ticker": asset.ticker,
                 "Asset Type": str(asset.asset_type),
                 "Forward Bucket": bucket.title(),
-                "Historical Annual Return (%)": hist_annual,
+                "Historical Annual Return (%)": float(hist_annual),
                 "Historical Monthly Vol (%)": float(hist_vol.get(asset.ticker, 0.0)),
                 "Target Annual Return (%)": float(target_annual),
                 "Applied Vol Multiplier": bucket_vol,

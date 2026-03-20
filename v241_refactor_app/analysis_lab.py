@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .models import AssetConfig, PortfolioInputs
-from .monte_carlo import build_forward_assumption_audit, simulate_monte_carlo
+from .monte_carlo import build_forward_assumption_audit, materialize_forward_assumption_overrides, simulate_monte_carlo
 
 
 SUMMARY_METRICS = {
@@ -60,7 +60,10 @@ def _run_mc_summary(
 
 
 def _analysis_sims(base_sims: int, *, floor: int = 250, ceiling: int = 800) -> int:
-    return int(max(floor, min(ceiling, max(base_sims // 4, floor))))
+    base_sims = int(max(base_sims, 1))
+    if base_sims <= floor:
+        return base_sims
+    return int(min(ceiling, max(base_sims // 4, floor)))
 
 
 def _analysis_inputs(portfolio_inputs: PortfolioInputs) -> PortfolioInputs:
@@ -107,7 +110,21 @@ def build_fragility_analysis(
 
     rows: List[Dict[str, float | str]] = []
     for label, overrides in stress_cases:
-        stressed_inputs = replace(analysis_inputs, **overrides)
+        needs_explicit_forward = any(
+            k in overrides
+            for k in {
+                "monte_carlo_return_shift_pct",
+                "monte_carlo_vol_multiplier",
+                "monte_carlo_return_haircut_pct",
+                "monte_carlo_dividend_multiplier",
+            }
+        )
+        merged_overrides: Dict[str, object] = {}
+        if needs_explicit_forward:
+            merged_overrides.update(materialize_forward_assumption_overrides(analysis_inputs))
+            merged_overrides["monte_carlo_forward_mode"] = "Custom Forward Stress"
+        merged_overrides.update(overrides)
+        stressed_inputs = replace(analysis_inputs, **merged_overrides)
         metrics = base if label == "Base Case" else _run_mc_summary(
             stressed_inputs,
             assets,
@@ -141,29 +158,36 @@ def build_fragility_analysis(
             "Median CAGR (%)",
         ]:
             fragility_df[f"Delta vs Base :: {col}"] = fragility_df[col] - float(base_row[col])
-        fragility_df["Fragility Rank"] = np.where(
+        fragility_scale = max(abs(float(base_row["Real P10 Ending Balance (USD)"])), abs(float(base_row["Real Median Ending Balance (USD)"])), 25000.0)
+        fragility_df["Fragility Score (heuristic)"] = np.where(
             fragility_df["Scenario"].eq("Base Case"),
             0.0,
             (
-                fragility_df["Delta vs Base :: Failure Rate (%)"].abs() * 5.0
-                + (fragility_df["Delta vs Base :: Real P10 Ending Balance (USD)"].abs() / max(float(base_row["Real P10 Ending Balance (USD)"]), 25000.0)) * 100.0
+                fragility_df["Delta vs Base :: Failure Rate (%)"].abs() * 4.0
+                + (fragility_df["Delta vs Base :: Real P10 Ending Balance (USD)"].abs() / fragility_scale) * 100.0
             ),
         )
+        fragility_df["Fragility Rank"] = fragility_df["Fragility Score (heuristic)"]
         fragility_df = pd.concat(
-            [fragility_df.iloc[[0]], fragility_df.iloc[1:].sort_values("Fragility Rank", ascending=False)],
+            [fragility_df.iloc[[0]], fragility_df.iloc[1:].sort_values("Fragility Score (heuristic)", ascending=False)],
             ignore_index=True,
         )
 
+    explicit_forward = materialize_forward_assumption_overrides(analysis_inputs)
     wr_levels = sorted({max(float(portfolio_inputs.withdrawal_rate) + delta, 0.0) for delta in (-2.0, -1.0, 0.0, 1.0, 2.0)})
     shift_levels = sorted({float(portfolio_inputs.monte_carlo_return_shift_pct) + delta for delta in (-3.0, -1.5, 0.0, 1.5, 3.0)})
     grid_rows: List[Dict[str, float]] = []
     for wr in wr_levels:
         for shift in shift_levels:
-            stressed_inputs = replace(
-                analysis_inputs,
-                withdrawal_rate=float(wr),
-                monte_carlo_return_shift_pct=float(shift),
+            grid_overrides: Dict[str, object] = dict(explicit_forward)
+            grid_overrides.update(
+                {
+                    "monte_carlo_forward_mode": "Custom Forward Stress",
+                    "withdrawal_rate": float(wr),
+                    "monte_carlo_return_shift_pct": float(shift),
+                }
             )
+            stressed_inputs = replace(analysis_inputs, **grid_overrides)
             metrics = _run_mc_summary(
                 stressed_inputs,
                 assets,
@@ -174,7 +198,7 @@ def build_fragility_analysis(
             grid_rows.append(
                 {
                     "Withdrawal Rate (%)": float(wr),
-                    "Annual Return Shift (%)": float(shift),
+                    "Explicit Forward Return Shift (%)": float(shift),
                     "Failure Rate (%)": float(metrics.get("failure_rate_pct", np.nan)),
                     "Real Median Ending Balance (USD)": float(metrics.get("real_median_ending_balance", np.nan)),
                     "Real P10 Ending Balance (USD)": float(metrics.get("real_p10_ending_balance", np.nan)),
@@ -185,7 +209,7 @@ def build_fragility_analysis(
     if not fragility_grid_df.empty:
         fragility_pivot_df = fragility_grid_df.pivot(
             index="Withdrawal Rate (%)",
-            columns="Annual Return Shift (%)",
+            columns="Explicit Forward Return Shift (%)",
             values="Failure Rate (%)",
         ).sort_index().sort_index(axis=1)
         fragility_pivot_df.index.name = "Withdrawal Rate (%)"

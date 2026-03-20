@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from typing import Dict, List
 
@@ -8,7 +9,7 @@ import streamlit as st
 
 from . import orchestration as orch
 from .analytics import build_overlap_warning_lines
-from .config import APP_CAPTION, APP_TITLE, DEFAULT_TIINGO_API_TOKEN, configure_page
+from .config import APP_CAPTION, APP_TITLE, configure_page
 from .data_layer import prepare_historical_dataset
 from .exporters import simulation_to_csv
 from .models import AssetConfig, PortfolioInputs
@@ -53,7 +54,6 @@ def _build_portfolio_inputs(
     contribution_end_year_input: str,
     annual_fee_rate: float,
     inflation_rate: float,
-    enable_real_dollars: bool,
     tax_rate_dividends: float,
     tax_rate_withdrawals: float,
     withdrawal_mode: str,
@@ -103,7 +103,7 @@ def _build_portfolio_inputs(
         contribution_amount=float(contribution_amount),
         contribution_end_year=contribution_end_year,
         annual_fee_rate=float(annual_fee_rate),
-        inflation_rate=float(inflation_rate if enable_real_dollars else 0.0),
+        inflation_rate=float(inflation_rate),
         tax_rate_dividends=float(tax_rate_dividends),
         tax_rate_withdrawals=float(tax_rate_withdrawals),
         withdrawal_mode=withdrawal_mode,
@@ -147,8 +147,8 @@ def _build_portfolio_inputs(
     )
 
 
-def _build_raw_state_payload(assets: List[AssetConfig], widget_values: Dict[str, object], token: str) -> Dict[str, object]:
-    return {"assets": [asdict(asset) for asset in assets], "inputs": widget_values, "token": token}
+def _build_raw_state_payload(assets: List[AssetConfig], widget_values: Dict[str, object]) -> Dict[str, object]:
+    return {"assets": [asdict(asset) for asset in assets], "inputs": widget_values}
 
 
 def _core_render_signature(core_signature: str, year_range: tuple[int, int]) -> str:
@@ -271,8 +271,18 @@ def main() -> None:
         compare_saved = st.multiselect("Compare saved scenarios", sorted(st.session_state.get("saved_scenarios", {}).keys()), default=[])
         show_component_table = st.checkbox("Show per-asset monthly contribution table", value=False)
         show_benchmark_overlay = st.checkbox("Show benchmark comparison", value=bool(st.session_state.get("benchmark_enabled", True)))
-        enable_real_dollars = st.checkbox("Use inflation-adjusted analytics", value=True)
-        tiingo_token = st.text_input("Tiingo API Token", value=DEFAULT_TIINGO_API_TOKEN, type="password")
+        display_real_dollars = st.checkbox(
+            "Display inflation-adjusted balances/analytics",
+            value=bool(st.session_state.get("display_real_dollars", True)),
+            key="display_real_dollars",
+        )
+        tiingo_token = st.text_input(
+            "Tiingo API Token",
+            value=st.session_state.get("tiingo_api_token", ""),
+            type="password",
+            key="tiingo_api_token",
+            help="Stored only in this session. Leave blank to use TIINGO_API_TOKEN from the environment.",
+        ).strip()
 
     st.subheader("Core Portfolio Inputs")
     initial_investment = st.number_input("Initial Investment (USD)", value=float(st.session_state.get("initial_investment", 100000.0)), min_value=0.0, step=1000.0, key="initial_investment")
@@ -452,7 +462,7 @@ def main() -> None:
         "contribution_end_year_input": str(contribution_end_year_input).strip(),
         "annual_fee_rate": float(annual_fee_rate),
         "inflation_rate": float(inflation_rate),
-        "enable_real_dollars": bool(enable_real_dollars),
+        "display_real_dollars": bool(display_real_dollars),
         "tax_rate_dividends": float(tax_rate_dividends),
         "tax_rate_withdrawals": float(tax_rate_withdrawals),
         "withdrawal_mode": withdrawal_mode,
@@ -494,13 +504,16 @@ def main() -> None:
         "monte_carlo_bucket_cma_aggressive_vol_multiplier": float(monte_carlo_bucket_cma_aggressive_vol_multiplier),
         "monte_carlo_bucket_cma_crypto_vol_multiplier": float(monte_carlo_bucket_cma_crypto_vol_multiplier),
     }
-    raw_signature = build_raw_signature(_build_raw_state_payload(assets, widget_payload, tiingo_token))
+    raw_signature = build_raw_signature(_build_raw_state_payload(assets, widget_payload))
 
     current_valid_snapshot = None
     current_core_signature = None
     current_validation_error = None
+    resolved_tiingo_token = tiingo_token or os.getenv("TIINGO_API_TOKEN", "").strip()
     try:
         valid_assets = validate_assets(assets)
+        if not resolved_tiingo_token:
+            raise ValueError("Provide a Tiingo API token in the sidebar or set TIINGO_API_TOKEN in the environment.")
         portfolio_inputs = _build_portfolio_inputs(
             initial_investment=initial_investment,
             withdrawal_rate=withdrawal_rate,
@@ -509,7 +522,6 @@ def main() -> None:
             contribution_end_year_input=contribution_end_year_input,
             annual_fee_rate=annual_fee_rate,
             inflation_rate=inflation_rate,
-            enable_real_dollars=enable_real_dollars,
             tax_rate_dividends=tax_rate_dividends,
             tax_rate_withdrawals=tax_rate_withdrawals,
             withdrawal_mode=withdrawal_mode,
@@ -551,7 +563,14 @@ def main() -> None:
             monte_carlo_bucket_cma_aggressive_vol_multiplier=monte_carlo_bucket_cma_aggressive_vol_multiplier,
             monte_carlo_bucket_cma_crypto_vol_multiplier=monte_carlo_bucket_cma_crypto_vol_multiplier,
         )
-        current_valid_snapshot = orch.make_run_snapshot(portfolio_inputs, valid_assets, tiingo_token, raw_signature)
+        resolved_token = resolved_tiingo_token
+        current_valid_snapshot = orch.make_run_snapshot(
+            portfolio_inputs,
+            valid_assets,
+            resolved_token,
+            raw_signature,
+            ui_preferences={"display_real_dollars": bool(display_real_dollars)},
+        )
         current_core_signature = orch.snapshot_core_signature(current_valid_snapshot)
     except Exception as exc:  # noqa: BLE001
         current_validation_error = str(exc)
@@ -606,7 +625,7 @@ def main() -> None:
             store_rendered_artifacts(core_render_signature, core_artifacts)
 
         st.subheader("Summary")
-        render_metric_tabs(core_artifacts.metrics)
+        render_metric_tabs(core_artifacts.metrics, show_real_values=bool(active_snapshot.ui_preferences.get("display_real_dollars", True)) if active_snapshot.ui_preferences else True)
         st.caption(
             "Historical results are cached and rendered first. Benchmark comparison, Monte Carlo, scenario comparison, and workbook export reuse cached artifacts and only compute when requested."
         )
@@ -619,7 +638,13 @@ def main() -> None:
             st.write("")
             if st.button("Save Scenario"):
                 try:
-                    save_current_scenario(scenario_name_to_save, active_inputs, active_assets, year_range)
+                    save_current_scenario(
+                        scenario_name_to_save,
+                        active_inputs,
+                        active_assets,
+                        year_range,
+                        ui_preferences={"display_real_dollars": bool((active_snapshot.ui_preferences or {}).get("display_real_dollars", True))},
+                    )
                     st.success(f"Saved scenario: {scenario_name_to_save}")
                 except Exception as exc:  # noqa: BLE001
                     st.error(str(exc))
@@ -655,10 +680,11 @@ def main() -> None:
             st.subheader("Results Table")
             overview_table_view = st.radio("Overview table view", options=["Monthly", "Yearly"], horizontal=True, key="overview_table_view")
             st.caption("Display only. Calculations, cashflows, and simulations remain monthly under the hood.")
-            render_table(core_artifacts.selection.results_df, view_mode=overview_table_view)
+            render_table(core_artifacts.selection.results_df, view_mode=overview_table_view, show_real_values=bool(active_snapshot.ui_preferences.get("display_real_dollars", True)) if active_snapshot.ui_preferences else True)
             chart_tab1, chart_tab2, chart_tab3 = st.tabs(["Portfolio", "Cashflow", "Drawdown"])
             with chart_tab1:
-                st.line_chart(core_artifacts.selection.results_df.set_index("Period")[["Balance (USD)", "Real Balance (USD)"]])
+                balance_chart_cols = ["Balance (USD)"] + (["Real Balance (USD)"] if (active_snapshot.ui_preferences or {}).get("display_real_dollars", True) else [])
+                st.line_chart(core_artifacts.selection.results_df.set_index("Period")[balance_chart_cols])
             with chart_tab2:
                 st.line_chart(core_artifacts.selection.results_df.set_index("Period")[["Withdrawal (USD)", "Dividend Yield (USD)", "Total Withdrawal + Dividend (USD)"]])
             with chart_tab3:
@@ -842,11 +868,11 @@ def main() -> None:
             st.caption("This table shows how the active forward mode maps each asset into a bucket and what annual return / volatility assumptions are being imposed before Monte Carlo paths are simulated.")
             st.dataframe(forward_audit_df, use_container_width=True)
 
-            fragility_subtab, decision_subtab = st.tabs(["Fragility", "Decision Engine"])
+            fragility_subtab, decision_subtab = st.tabs(["Fragility", "Policy Comparison"])
             fragility_signature = build_raw_signature({"kind": "fragility", "core": active_core_signature, "year_range": list(year_range)})
             with fragility_subtab:
                 st.caption("Fragility runs use a reduced simulation count on purpose so they behave like a fast sensitivity lab rather than a second full Monte Carlo stack.")
-                if st.button("Build fragility layer", key="build_fragility_layer"):
+                if st.button("Build fragility analysis", key="build_fragility_layer"):
                     with st.spinner("Running fragility sweeps..."):
                         fragility_outputs = orch.build_fragility_artifacts_cached(
                             portfolio_input_dict=active_snapshot.portfolio_inputs,
@@ -855,9 +881,8 @@ def main() -> None:
                             selected_divs_df=core_artifacts.selection.selected_divs_df,
                             start_period=core_artifacts.selection.filtered_periods[0],
                         )
-                    st.session_state["latest_fragility_outputs"] = {"signature": fragility_signature, "payload": fragility_outputs}
-                fragility_state = st.session_state.get("latest_fragility_outputs")
-                fragility_outputs = fragility_state.get("payload") if isinstance(fragility_state, dict) and fragility_state.get("signature") == fragility_signature else None
+                    store_bucket_artifact("fragility", fragility_signature, fragility_outputs)
+                fragility_outputs = get_bucket_artifact("fragility", fragility_signature)
                 if isinstance(fragility_outputs, dict):
                     fragility_df = fragility_outputs.get("fragility_df")
                     fragility_pivot_df = fragility_outputs.get("fragility_pivot_df")
@@ -867,10 +892,10 @@ def main() -> None:
                         if delta_cols:
                             st.bar_chart(fragility_df.set_index("Scenario")[delta_cols])
                     if isinstance(fragility_pivot_df, pd.DataFrame) and not fragility_pivot_df.empty:
-                        st.subheader("Failure-rate matrix: withdrawal rate vs forward return shift")
+                        st.subheader("Failure-rate matrix: withdrawal rate vs explicit forward return shift")
                         st.dataframe(fragility_pivot_df, use_container_width=True)
                 else:
-                    st.info("Build the fragility layer to see ranked sensitivities and a failure-rate matrix.")
+                    st.info("Build the fragility layer to see ranked sensitivities and a failure-rate matrix. Return-shift sweeps are forced into an explicit custom forward-stress mode so the axis always changes the simulation.")
 
             with decision_subtab:
                 decision_objective = st.selectbox(
@@ -879,8 +904,8 @@ def main() -> None:
                     key="decision_objective",
                 )
                 decision_signature = build_raw_signature({"kind": "decision", "core": active_core_signature, "year_range": list(year_range), "objective": decision_objective})
-                st.caption("This constrained decision layer does not invent new withdrawal rules. It only compares safe policy variants that already exist inside the engine: lower spending, dividend-first withdrawals, and alternate rebalancing policies.")
-                if st.button("Run decision engine", key="run_decision_engine"):
+                st.caption("This constrained policy comparison does not invent new withdrawal rules. It compares a small set of existing engine policies: lower spending, dividend-first withdrawals, and alternate rebalancing policies.")
+                if st.button("Run policy comparison", key="run_decision_engine"):
                     with st.spinner("Ranking policy variants..."):
                         decision_outputs = orch.build_decision_artifacts_cached(
                             portfolio_input_dict=active_snapshot.portfolio_inputs,
@@ -890,9 +915,8 @@ def main() -> None:
                             start_period=core_artifacts.selection.filtered_periods[0],
                             objective=decision_objective,
                         )
-                    st.session_state["latest_decision_outputs"] = {"signature": decision_signature, "payload": decision_outputs}
-                decision_state = st.session_state.get("latest_decision_outputs")
-                decision_outputs = decision_state.get("payload") if isinstance(decision_state, dict) and decision_state.get("signature") == decision_signature else None
+                    store_bucket_artifact("decision", decision_signature, decision_outputs)
+                decision_outputs = get_bucket_artifact("decision", decision_signature)
                 if isinstance(decision_outputs, dict):
                     recommendation_text = decision_outputs.get("recommendation_text")
                     policy_df = decision_outputs.get("policy_df")
@@ -907,7 +931,7 @@ def main() -> None:
                         if frontier_cols:
                             st.bar_chart(policy_df.set_index("Policy")[frontier_cols])
                 else:
-                    st.info("Run the decision engine to rank safe policy alternatives around the current plan.")
+                    st.info("Run the policy comparison to rank safe alternatives around the current plan.")
 
         st.subheader("Workbook Export")
         export_signature = _export_signature(

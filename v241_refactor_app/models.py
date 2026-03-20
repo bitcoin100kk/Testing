@@ -145,6 +145,7 @@ class RunSnapshot:
     assets: List[Dict[str, object]]
     token: str
     raw_signature: str
+    ui_preferences: Dict[str, object] | None = None
 
 
 @dataclass

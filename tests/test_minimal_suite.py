@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pandas.testing as pdt
 
-from v241_refactor_app.engine import _apply_withdrawal_trade, maybe_rebalance, run_historical_simulation
+from v241_refactor_app.engine import _apply_withdrawal_trade, maybe_rebalance, run_historical_simulation, simulate_portfolio
 from v241_refactor_app.mc_kernel import build_mc_path_plan, simulate_portfolio_path
 from v241_refactor_app.models import HistoricalSelection
 from v241_refactor_app.monte_carlo import simulate_monte_carlo
@@ -407,3 +407,157 @@ def test_decision_engine_ranks_policies(base_inputs, base_assets, base_dataset):
     assert int(policy_df.iloc[0]['Rank']) == 1
     assert 'Current' in set(policy_df['Policy'])
     assert not recommendation_df.empty
+
+
+def test_app_input_builder_does_not_zero_out_inflation_when_real_display_is_off():
+    from v241_refactor_app.app import _build_portfolio_inputs
+
+    inputs = _build_portfolio_inputs(
+        initial_investment=100000.0,
+        withdrawal_rate=4.0,
+        reinvest_dividends=False,
+        contribution_amount=0.0,
+        contribution_end_year_input="",
+        annual_fee_rate=0.0,
+        inflation_rate=3.5,
+        tax_rate_dividends=0.0,
+        tax_rate_withdrawals=0.0,
+        withdrawal_mode="Fixed Dollar",
+        show_benchmark_overlay=False,
+        benchmark_ticker="SPY",
+        benchmark_type="Stock",
+        rebalancing_method="Annual",
+        rebalance_band=5.0,
+        rebalance_cost_bps=5.0,
+        cashflow_trade_cost_bps=0.0,
+        asset_class_aware_costs=True,
+        aum_cost_scaling=True,
+        aum_cost_scaling_strength=0.25,
+        crypto_cost_multiplier=4.0,
+        analysis_mode="Historical Backtest",
+        monte_carlo_sims=100,
+        monte_carlo_years=30,
+        monte_carlo_seed=42,
+        monte_carlo_block_size_months=12,
+        monte_carlo_regime_mode="All History",
+        monte_carlo_regime_window_months=6,
+        monte_carlo_bootstrap_method="Block Bootstrap",
+        monte_carlo_regime_strength=1.0,
+        monte_carlo_adaptive_convergence=True,
+        monte_carlo_target_stderr_pct=0.35,
+        monte_carlo_forward_mode="Historical Base",
+        monte_carlo_return_haircut_pct=0.0,
+        monte_carlo_return_shift_pct=0.0,
+        monte_carlo_vol_multiplier=1.0,
+        monte_carlo_growth_extra_haircut_pct=0.0,
+        monte_carlo_crypto_extra_haircut_pct=0.0,
+        monte_carlo_dividend_multiplier=1.0,
+        monte_carlo_bucket_cma_defensive_return_pct=4.0,
+        monte_carlo_bucket_cma_core_return_pct=6.0,
+        monte_carlo_bucket_cma_aggressive_return_pct=8.0,
+        monte_carlo_bucket_cma_crypto_return_pct=12.0,
+        monte_carlo_bucket_cma_defensive_vol_multiplier=0.9,
+        monte_carlo_bucket_cma_core_vol_multiplier=1.0,
+        monte_carlo_bucket_cma_aggressive_vol_multiplier=1.1,
+        monte_carlo_bucket_cma_crypto_vol_multiplier=1.25,
+    )
+    assert inputs.inflation_rate == 3.5
+
+
+def test_withdrawal_tax_targets_net_cash_not_gross_sales():
+    taxed_inputs = make_portfolio_inputs(
+        initial_investment=120000.0,
+        contribution_amount=0.0,
+        withdrawal_mode="Fixed Dollar",
+        withdrawal_rate=12.0,
+        annual_fee_rate=0.0,
+        tax_rate_dividends=0.0,
+        tax_rate_withdrawals=20.0,
+        cashflow_trade_cost_bps=0.0,
+        rebalance_cost_bps=0.0,
+        rebalancing_method="None",
+        monte_carlo_years=1,
+    )
+    one_asset = make_assets((("AAA", 100.0, "Stock"),))
+    plan = build_mc_path_plan(taxed_inputs, one_asset, pd.Timestamp("2020-01-31"))
+    result = simulate_portfolio_path(
+        plan=plan,
+        portfolio_inputs=taxed_inputs,
+        returns_matrix=np.zeros((12, 1), dtype=float),
+        dividends_matrix=np.zeros((12, 1), dtype=float),
+    )
+    assert result.shortfall == 0.0
+
+    periods = list(pd.date_range("2020-01-31", periods=12, freq="ME"))
+    results_df = simulate_portfolio(
+        portfolio_inputs=taxed_inputs,
+        assets=one_asset,
+        returns_df=pd.DataFrame({"AAA": np.zeros(12)}, index=periods),
+        dividends_df=pd.DataFrame({"AAA": np.zeros(12)}, index=periods),
+        filtered_periods=periods,
+    )
+    first_row = results_df.iloc[0]
+    assert abs(float(first_row["Withdrawal Target (USD)"]) - 1200.0) < 1e-9
+    assert abs(float(first_row["Withdrawal (USD)"]) - 1200.0) < 1e-9
+    assert abs(float(first_row["Gross Withdrawal (USD)"]) - 1500.0) < 1e-9
+    assert abs(float(first_row["Withdrawal Shortfall (USD)"])) < 1e-9
+
+
+def test_fragility_grid_explicit_shift_axis_is_present(base_inputs, base_assets, base_dataset):
+    from v241_refactor_app.analysis_lab import build_fragility_analysis
+
+    selection = run_historical_simulation(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+    outputs = build_fragility_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+    assert "Explicit Forward Return Shift (%)" in outputs["fragility_grid_df"].columns
+
+
+def test_asset_matrix_diagnostics_surface_fallback_and_dividend_filters(monkeypatch):
+    from v241_refactor_app.data_layer import build_asset_matrices
+
+    stock_index = pd.date_range("2020-01-31", periods=12, freq="ME")
+    stock_returns = pd.Series(np.linspace(0.5, 1.6, 12), index=stock_index)
+    stock_divs = pd.Series([0.0] * 11 + [0.2], index=stock_index)
+
+    def fake_stock_meta(ticker, token):
+        return stock_returns, stock_divs, [2020], {
+            "data_source": "stock_api",
+            "filtered_dividend_events": 2,
+            "clipped_dividend_months": 1,
+            "fallback_used": False,
+            "fallback_reason": "",
+        }
+
+    def fake_crypto_meta(ticker, token):
+        return stock_returns, [2020], {
+            "data_source": "stock_api_fallback",
+            "filtered_dividend_events": 0,
+            "clipped_dividend_months": 0,
+            "fallback_used": True,
+            "fallback_reason": "crypto endpoint unavailable",
+        }
+
+    monkeypatch.setattr("v241_refactor_app.data_layer._get_stock_data_with_metadata", fake_stock_meta)
+    monkeypatch.setattr("v241_refactor_app.data_layer._get_crypto_data_with_metadata", fake_crypto_meta)
+
+    _, _, _, _, diagnostics = build_asset_matrices(
+        [
+            make_assets((("AAA", 50.0, "Stock"),))[0],
+            make_assets((("BTC", 50.0, "Crypto"),))[0],
+        ],
+        token="dummy",
+    )
+    diagnostics_df = pd.DataFrame(diagnostics)
+    assert "Data Source" in diagnostics_df.columns
+    assert bool(diagnostics_df.loc[diagnostics_df["Ticker"] == "BTC", "Fallback Used"].iloc[0]) is True
+    assert int(diagnostics_df.loc[diagnostics_df["Ticker"] == "AAA", "Filtered Dividend Events"].iloc[0]) == 2

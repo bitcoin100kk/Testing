@@ -121,12 +121,15 @@ def _format_benchmark_display_table(comparison_df: pd.DataFrame, view_mode: str)
     return display_df[display_cols]
 
 
-def render_metric_tabs(metrics: Dict[str, float]) -> None:
+def render_metric_tabs(metrics: Dict[str, float], *, show_real_values: bool = True) -> None:
     tab1, tab2, tab3 = st.tabs(["Overview", "Risk", "Cashflow"])
     with tab1:
         cols = st.columns(4)
         cols[0].metric("Final Balance", f"${format_currency(metrics['Final Balance'])}")
-        cols[1].metric("Real Final Balance", f"${format_currency(metrics['Real Final Balance'])}")
+        if show_real_values:
+            cols[1].metric("Real Final Balance", f"${format_currency(metrics['Real Final Balance'])}")
+        else:
+            cols[1].metric("Inflation-Adjusted View", "Hidden")
         cols[2].metric("CAGR", f"{metrics['CAGR']:.2f}%" if not math.isnan(metrics["CAGR"]) else "N/A")
         cols[3].metric("Max Drawdown", f"{metrics['Max Drawdown']:.2f}%")
         cols2 = st.columns(4)
@@ -156,7 +159,7 @@ def render_metric_tabs(metrics: Dict[str, float]) -> None:
         st.caption(f"Withdrawal shortfall months: {int(metrics['Withdrawal Shortfall Months'])}")
 
 
-def render_table(results_df: pd.DataFrame, view_mode: str = "Monthly") -> None:
+def render_table(results_df: pd.DataFrame, view_mode: str = "Monthly", *, show_real_values: bool = True) -> None:
     display_source = _aggregate_results_for_display(results_df, view_mode=view_mode)
     if display_source.empty:
         st.info("No rows available for the selected table view.")
@@ -180,6 +183,8 @@ def render_table(results_df: pd.DataFrame, view_mode: str = "Monthly") -> None:
     if "Months Included" in display_source.columns:
         display_cols.insert(1, "Months Included")
 
+    if not show_real_values and "Real Balance (USD)" in display_cols:
+        display_cols.remove("Real Balance (USD)")
     display_df = display_source[display_cols].copy()
     if str(view_mode) == "Monthly":
         display_df["Period"] = pd.to_datetime(display_df["Period"]).dt.strftime("%Y-%m")
@@ -202,7 +207,7 @@ def render_table(results_df: pd.DataFrame, view_mode: str = "Monthly") -> None:
 
     display_df["Portfolio Total Return (%)"] = display_df["Portfolio Total Return (%)"].apply(_format_percentage_or_na)
     styled_df = display_df.style.applymap(highlight_changes, subset=["Portfolio Total Return (%)"])
-    st.write(styled_df.to_html(index=False), unsafe_allow_html=True)
+    st.dataframe(styled_df, use_container_width=True)
 
 
 def render_overlap_alerts(dataset: HistoricalDataset, overlap_warning_lines: Sequence[str]) -> None:

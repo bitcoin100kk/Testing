@@ -69,8 +69,8 @@ def build_raw_signature(payload: Dict[str, object]) -> str:
     return stable_hash_payload(payload)
 
 
-def build_core_signature(input_dict: Dict[str, object], asset_specs: Sequence[Tuple[str, float, str]], token: str) -> str:
-    payload = {"portfolio_inputs": input_dict, "assets": list(asset_specs), "token": token}
+def build_core_signature(input_dict: Dict[str, object], asset_specs: Sequence[Tuple[str, float, str]], token: str | None = None) -> str:
+    payload = {"portfolio_inputs": input_dict, "assets": list(asset_specs)}
     return stable_hash_payload(payload)
 
 
@@ -92,7 +92,7 @@ def highlight_changes(val: object) -> str:
         numeric_val = float(val)
     except Exception:  # noqa: BLE001
         return ""
-    return f"color: {'green' if numeric_val > 0 else 'red'}"
+    return f"color: {'green' if numeric_val > 0 else ('red' if numeric_val < 0 else 'inherit')}"
 
 
 def _format_percentage_or_na(value: object) -> str:

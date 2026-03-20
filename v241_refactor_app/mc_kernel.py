@@ -11,8 +11,10 @@ from .engine import (
     _allocate_cashflow_proportionally,
     _apply_contribution_trade,
     _apply_withdrawal_trade,
+    _gross_needed_for_net_withdrawal,
     _portfolio_total,
     _weight_map,
+    _withdrawal_tax_rate,
     maybe_rebalance,
 )
 from .models import AssetConfig, MonteCarloPathResult, PortfolioInputs
@@ -135,19 +137,21 @@ def simulate_portfolio_path(
         dividend_tax = gross_dividend_usd * (float(portfolio_inputs.tax_rate_dividends) / 100.0)
         net_dividend_usd = gross_dividend_usd - dividend_tax
 
+        dividend_cash_available_for_spending = 0.0 if portfolio_inputs.reinvest_dividends else net_dividend_usd
         if portfolio_inputs.withdrawal_mode == "Percent of Balance":
-            desired_gross_withdrawal = current_total_after_contrib * plan.monthly_withdrawal_rate
+            target_net_cash_need = current_total_after_contrib * plan.monthly_withdrawal_rate
         elif portfolio_inputs.withdrawal_mode == "Fixed Dollar":
-            desired_gross_withdrawal = plan.fixed_monthly_withdrawal_base
+            target_net_cash_need = plan.fixed_monthly_withdrawal_base
         elif portfolio_inputs.withdrawal_mode == "Inflation-Adjusted Dollar":
-            desired_gross_withdrawal = plan.fixed_monthly_withdrawal_base * ((1.0 + plan.monthly_inflation_rate) ** i)
+            target_net_cash_need = plan.fixed_monthly_withdrawal_base * ((1.0 + plan.monthly_inflation_rate) ** i)
         elif portfolio_inputs.withdrawal_mode == "Dividend First":
             target_cash_need = current_total_after_contrib * plan.monthly_withdrawal_rate
-            desired_gross_withdrawal = max(target_cash_need - net_dividend_usd, 0.0)
+            target_net_cash_need = max(target_cash_need - dividend_cash_available_for_spending, 0.0)
         else:
             raise ValueError(f"Unsupported withdrawal mode: {portfolio_inputs.withdrawal_mode}")
 
-        balances, gross_withdrawal, withdrawal_trade_cost, withdrawal_shortfall = _apply_withdrawal_trade(
+        desired_gross_withdrawal = _gross_needed_for_net_withdrawal(target_net_cash_need, portfolio_inputs)
+        balances, gross_withdrawal, withdrawal_trade_cost, gross_withdrawal_shortfall = _apply_withdrawal_trade(
             balances=balances,
             desired_gross_amount=desired_gross_withdrawal,
             target_weights=plan.target_weights,
@@ -156,7 +160,9 @@ def simulate_portfolio_path(
             portfolio_inputs=portfolio_inputs,
         )
         total_trading_cost_usd += float(withdrawal_trade_cost)
-        _ = gross_withdrawal * (float(portfolio_inputs.tax_rate_withdrawals) / 100.0)
+        withdrawal_tax = gross_withdrawal * _withdrawal_tax_rate(portfolio_inputs)
+        net_cash_from_withdrawal = gross_withdrawal - withdrawal_tax
+        withdrawal_shortfall = max(target_net_cash_need - net_cash_from_withdrawal, 0.0)
 
         balances, _, _, rebalance_cost_withdrawal, _ = maybe_rebalance(
             balances,
