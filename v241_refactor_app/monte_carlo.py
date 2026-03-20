@@ -259,6 +259,17 @@ class MonteCarloForwardSpec:
     vol_multiplier_by_bucket: Optional[Dict[str, float]] = None
 
 
+
+@dataclass(frozen=True)
+class MonteCarloForwardContext:
+    mode: str
+    hist_monthly_mu: np.ndarray
+    target_monthly_mu: np.ndarray
+    bucket_vol: np.ndarray
+    dividend_multiplier: float
+    bucket_map: Dict[str, str]
+
+
 def _effective_forward_spec(portfolio_inputs: PortfolioInputs) -> MonteCarloForwardSpec:
     mode = str(getattr(portfolio_inputs, "monte_carlo_forward_mode", "Historical Base"))
     presets = {
@@ -391,22 +402,22 @@ def _monthly_target_from_annual_pct(annual_pct: float) -> float:
     return (((1.0 + (annual_pct / 100.0)) ** (1.0 / 12.0)) - 1.0) * 100.0
 
 
-def _apply_forward_overlay(
-    *,
-    sampled_returns: np.ndarray,
-    sampled_dividends: np.ndarray,
+def _prepare_forward_overlay_context(
     historical_returns_df: pd.DataFrame,
     assets: Sequence[AssetConfig],
     forward_spec: MonteCarloForwardSpec,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Optional[MonteCarloForwardContext]:
     if forward_spec.mode == "Historical Base":
-        return sampled_returns, sampled_dividends
+        return None
 
-    returns_adj = np.asarray(sampled_returns, dtype=float).copy()
-    dividends_adj = np.asarray(sampled_dividends, dtype=float).copy()
     hist_returns = historical_returns_df.to_numpy(dtype=float)
+    if hist_returns.ndim != 2:
+        raise ValueError("Historical returns must be a 2D matrix for forward-overlay preparation.")
+
     hist_mu = hist_returns.mean(axis=0)
     bucket_map = _classify_forward_buckets(historical_returns_df, assets)
+    target_monthly_mu = np.empty(len(assets), dtype=float)
+    bucket_vol = np.empty(len(assets), dtype=float)
 
     for j, asset in enumerate(assets):
         bucket = bucket_map.get(asset.ticker, "core")
@@ -420,15 +431,48 @@ def _apply_forward_overlay(
             target_annual = float(forward_spec.target_return_by_bucket[bucket])
         else:
             target_annual = (hist_annual * (1.0 - (total_haircut / 100.0))) + float(forward_spec.return_shift_pct)
-        target_monthly_mu = _monthly_target_from_annual_pct(target_annual)
-        centered = returns_adj[:, j] - hist_monthly_mu
-        bucket_vol = float(forward_spec.vol_multiplier_by_bucket.get(bucket, forward_spec.vol_multiplier)) if forward_spec.vol_multiplier_by_bucket else float(forward_spec.vol_multiplier)
-        returns_adj[:, j] = target_monthly_mu + (centered * bucket_vol)
+        target_monthly_mu[j] = _monthly_target_from_annual_pct(target_annual)
+        bucket_vol[j] = (
+            float(forward_spec.vol_multiplier_by_bucket.get(bucket, forward_spec.vol_multiplier))
+            if forward_spec.vol_multiplier_by_bucket
+            else float(forward_spec.vol_multiplier)
+        )
 
+    return MonteCarloForwardContext(
+        mode=str(forward_spec.mode),
+        hist_monthly_mu=np.asarray(hist_mu, dtype=float),
+        target_monthly_mu=target_monthly_mu,
+        bucket_vol=bucket_vol,
+        dividend_multiplier=float(forward_spec.dividend_multiplier),
+        bucket_map=bucket_map,
+    )
+
+
+def _apply_forward_overlay(
+    *,
+    sampled_returns: np.ndarray,
+    sampled_dividends: np.ndarray,
+    historical_returns_df: Optional[pd.DataFrame] = None,
+    assets: Optional[Sequence[AssetConfig]] = None,
+    forward_spec: Optional[MonteCarloForwardSpec] = None,
+    forward_context: Optional[MonteCarloForwardContext] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if forward_context is None:
+        if historical_returns_df is None and assets is None and forward_spec is None:
+            return sampled_returns, sampled_dividends
+        if historical_returns_df is None or assets is None or forward_spec is None:
+            raise ValueError("Forward overlay requires either a prepared forward_context or historical data, assets, and forward_spec.")
+        forward_context = _prepare_forward_overlay_context(historical_returns_df, assets, forward_spec)
+
+    if forward_context is None or forward_context.mode == "Historical Base":
+        return sampled_returns, sampled_dividends
+
+    returns_adj = np.asarray(sampled_returns, dtype=float).copy()
+    dividends_adj = np.asarray(sampled_dividends, dtype=float).copy()
+    returns_adj = forward_context.target_monthly_mu + ((returns_adj - forward_context.hist_monthly_mu) * forward_context.bucket_vol)
     returns_adj = np.clip(returns_adj, -99.999, None)
-    dividends_adj = np.clip(dividends_adj * float(forward_spec.dividend_multiplier), 0.0, None)
+    dividends_adj = np.clip(dividends_adj * float(forward_context.dividend_multiplier), 0.0, None)
     return returns_adj, dividends_adj
-
 
 
 
@@ -486,13 +530,76 @@ def build_forward_assumption_audit(
     return pd.DataFrame(rows)
 
 
-def simulate_monte_carlo(
+def _build_mc_summary_df(
+    *,
+    actual_sims: int,
+    ending_balance_arr: np.ndarray,
+    real_ending_balance_arr: np.ndarray,
+    ruin_arr: np.ndarray,
+    shortfall_arr: np.ndarray,
+    failure_arr: np.ndarray,
+    cagr_arr: np.ndarray,
+    min_balance_arr: np.ndarray,
+    min_real_balance_arr: np.ndarray,
+    depletion_month_arr: np.ndarray,
+    shortfall_month_arr: np.ndarray,
+    failure_month_arr: np.ndarray,
+    horizon_years: int,
+    percentiles_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    bottom_tail = pd.Series(ending_balance_arr).nsmallest(max(1, int(math.ceil(actual_sims * 0.05))))
+    cvar_balance = float(bottom_tail.mean()) if not bottom_tail.empty else 0.0
+    failure_rate = float(np.mean(failure_arr)) if actual_sims > 0 else 0.0
+    failure_stderr = math.sqrt(max(failure_rate * (1.0 - failure_rate), 0.0) / actual_sims) * 100.0 if actual_sims > 0 else 0.0
+    failure_month_series = pd.Series(failure_month_arr).dropna()
+    depletion_month_series = pd.Series(depletion_month_arr).dropna()
+    shortfall_month_series = pd.Series(shortfall_month_arr).dropna()
+    median_failure_year = _year_from_month(float(failure_month_series.median())) if not failure_month_series.empty else float("nan")
+    median_depletion_year = _year_from_month(float(depletion_month_series.median())) if not depletion_month_series.empty else float("nan")
+    median_shortfall_year = _year_from_month(float(shortfall_month_series.median())) if not shortfall_month_series.empty else float("nan")
+
+    summary_rows = [
+        ("Simulations Completed", float(actual_sims), "Count"),
+        ("Median Ending Balance", float(np.median(ending_balance_arr)), "USD"),
+        ("Real Median Ending Balance", float(np.median(real_ending_balance_arr)), "USD"),
+        ("10th Percentile Ending Balance", float(np.quantile(ending_balance_arr, 0.10)), "USD"),
+        ("Real 10th Percentile Ending Balance", float(np.quantile(real_ending_balance_arr, 0.10)), "USD"),
+        ("90th Percentile Ending Balance", float(np.quantile(ending_balance_arr, 0.90)), "USD"),
+        ("Real 90th Percentile Ending Balance", float(np.quantile(real_ending_balance_arr, 0.90)), "USD"),
+        ("Failure Rate (Ruin or Shortfall)", failure_rate * 100.0, "%"),
+        ("Failure StdErr", float(failure_stderr), "%"),
+        ("Ruin Rate", float(np.mean(ruin_arr) * 100.0), "%"),
+        ("Spending Shortfall Rate", float(np.mean(shortfall_arr) * 100.0), "%"),
+        ("Median Portfolio CAGR", float(np.nanmedian(cagr_arr)), "%"),
+        ("CVaR 5% Ending Balance", cvar_balance, "USD"),
+        ("Median Minimum Balance", float(np.median(min_balance_arr)), "USD"),
+        ("Median Minimum Real Balance", float(np.median(min_real_balance_arr)), "USD"),
+        ("Median Failure Year (conditional)", median_failure_year, "Years"),
+        ("Median Depletion Year (conditional)", median_depletion_year, "Years"),
+        ("Median Shortfall Year (conditional)", median_shortfall_year, "Years"),
+    ]
+    if percentiles_df is not None and not percentiles_df.empty:
+        for checkpoint_year in (10, 20, 30):
+            if checkpoint_year <= horizon_years:
+                summary_rows.append(
+                    (
+                        f"Survival Probability Through Year {checkpoint_year}",
+                        float(percentiles_df.loc[percentiles_df["Year"] == checkpoint_year, "Survival Probability (%)"].iloc[0]),
+                        "%",
+                    )
+                )
+    return pd.DataFrame(summary_rows, columns=["Metric", "Value", "Unit"])
+
+
+def _simulate_monte_carlo_internal(
     portfolio_inputs: PortfolioInputs,
     assets: Sequence[AssetConfig],
     historical_returns_df: pd.DataFrame,
     historical_dividends_df: pd.DataFrame,
     start_period: pd.Timestamp,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    *,
+    summary_only: bool,
+) -> Tuple[Optional[pd.DataFrame], pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     rng = np.random.default_rng(portfolio_inputs.monte_carlo_seed)
     if historical_returns_df.empty:
         raise ValueError("Historical returns are required for Monte Carlo simulation.")
@@ -518,17 +625,20 @@ def simulate_monte_carlo(
     )
     start_probabilities = _build_regime_start_probabilities(
         regime_scores=regime_scores,
-        regime_mode=portfolio_inputs.monte_carlo_regime_mode,
-        regime_strength=portfolio_inputs.monte_carlo_regime_strength,
+        regime_mode=str(portfolio_inputs.monte_carlo_regime_mode),
+        regime_strength=float(portfolio_inputs.monte_carlo_regime_strength),
     )
+    plan = build_mc_path_plan(portfolio_inputs, assets, start_period)
     forward_spec = _effective_forward_spec(portfolio_inputs)
-    plan = build_mc_path_plan(portfolio_inputs=portfolio_inputs, assets=assets, start_period=start_period)
+    forward_context = _prepare_forward_overlay_context(historical_returns_df, assets, forward_spec)
 
-    nominal_paths = np.empty((max_sims, horizon_years), dtype=float)
-    real_paths = np.empty((max_sims, horizon_years), dtype=float)
-    survival_paths = np.empty((max_sims, horizon_years), dtype=float)
-    ruin_paths = np.empty((max_sims, horizon_years), dtype=float)
-    shortfall_paths = np.empty((max_sims, horizon_years), dtype=float)
+    nominal_paths = real_paths = survival_paths = ruin_paths = shortfall_paths = None
+    if not summary_only:
+        nominal_paths = np.empty((max_sims, horizon_years), dtype=float)
+        real_paths = np.empty((max_sims, horizon_years), dtype=float)
+        survival_paths = np.empty((max_sims, horizon_years), dtype=float)
+        ruin_paths = np.empty((max_sims, horizon_years), dtype=float)
+        shortfall_paths = np.empty((max_sims, horizon_years), dtype=float)
 
     ending_balance_arr = np.empty(max_sims, dtype=float)
     real_ending_balance_arr = np.empty(max_sims, dtype=float)
@@ -569,9 +679,7 @@ def simulate_monte_carlo(
         sampled_returns, sampled_dividends = _apply_forward_overlay(
             sampled_returns=sampled_returns,
             sampled_dividends=sampled_dividends,
-            historical_returns_df=historical_returns_df,
-            assets=assets,
-            forward_spec=forward_spec,
+            forward_context=forward_context,
         )
 
         path_result = simulate_portfolio_path(
@@ -581,11 +689,12 @@ def simulate_monte_carlo(
             dividends_matrix=sampled_dividends,
         )
 
-        nominal_paths[sim, :] = path_result.yearly_balances
-        real_paths[sim, :] = path_result.yearly_real_balances
-        survival_paths[sim, :] = path_result.yearly_survival_flags
-        ruin_paths[sim, :] = path_result.yearly_ruin_flags
-        shortfall_paths[sim, :] = path_result.yearly_shortfall_flags
+        if not summary_only:
+            nominal_paths[sim, :] = path_result.yearly_balances
+            real_paths[sim, :] = path_result.yearly_real_balances
+            survival_paths[sim, :] = path_result.yearly_survival_flags
+            ruin_paths[sim, :] = path_result.yearly_ruin_flags
+            shortfall_paths[sim, :] = path_result.yearly_shortfall_flags
 
         ending_balance_arr[sim] = path_result.ending_balance
         real_ending_balance_arr[sim] = path_result.real_ending_balance
@@ -600,11 +709,7 @@ def simulate_monte_carlo(
         failure_month_arr[sim] = float(path_result.failure_month) if path_result.failure_month is not None else np.nan
         actual_sims = sim + 1
 
-        if (
-            bool(portfolio_inputs.monte_carlo_adaptive_convergence)
-            and actual_sims < max_sims
-            and (actual_sims % checkpoint_step == 0)
-        ):
+        if bool(portfolio_inputs.monte_carlo_adaptive_convergence) and actual_sims < max_sims and (actual_sims % checkpoint_step == 0):
             checkpoint_df = pd.DataFrame(
                 {
                     "Ending Balance": ending_balance_arr[:actual_sims],
@@ -624,11 +729,6 @@ def simulate_monte_carlo(
             ):
                 break
 
-    nominal_paths = nominal_paths[:actual_sims, :]
-    real_paths = real_paths[:actual_sims, :]
-    survival_paths = survival_paths[:actual_sims, :]
-    ruin_paths = ruin_paths[:actual_sims, :]
-    shortfall_paths = shortfall_paths[:actual_sims, :]
     ending_balance_arr = ending_balance_arr[:actual_sims]
     real_ending_balance_arr = real_ending_balance_arr[:actual_sims]
     ruin_arr = ruin_arr[:actual_sims]
@@ -640,6 +740,31 @@ def simulate_monte_carlo(
     depletion_month_arr = depletion_month_arr[:actual_sims]
     shortfall_month_arr = shortfall_month_arr[:actual_sims]
     failure_month_arr = failure_month_arr[:actual_sims]
+
+    if summary_only:
+        summary_df = _build_mc_summary_df(
+            actual_sims=actual_sims,
+            ending_balance_arr=ending_balance_arr,
+            real_ending_balance_arr=real_ending_balance_arr,
+            ruin_arr=ruin_arr,
+            shortfall_arr=shortfall_arr,
+            failure_arr=failure_arr,
+            cagr_arr=cagr_arr,
+            min_balance_arr=min_balance_arr,
+            min_real_balance_arr=min_real_balance_arr,
+            depletion_month_arr=depletion_month_arr,
+            shortfall_month_arr=shortfall_month_arr,
+            failure_month_arr=failure_month_arr,
+            horizon_years=horizon_years,
+            percentiles_df=None,
+        )
+        return None, summary_df, None, None
+
+    nominal_paths = nominal_paths[:actual_sims, :]
+    real_paths = real_paths[:actual_sims, :]
+    survival_paths = survival_paths[:actual_sims, :]
+    ruin_paths = ruin_paths[:actual_sims, :]
+    shortfall_paths = shortfall_paths[:actual_sims, :]
 
     years = np.arange(1, horizon_years + 1, dtype=int)
     percentiles_df = pd.DataFrame(
@@ -683,49 +808,63 @@ def simulate_monte_carlo(
         }
     )
 
-    bottom_tail = pd.Series(ending_balance_arr).nsmallest(max(1, int(math.ceil(actual_sims * 0.05))))
-    cvar_balance = float(bottom_tail.mean()) if not bottom_tail.empty else 0.0
-    failure_rate = float(np.mean(failure_arr)) if actual_sims > 0 else 0.0
-    failure_stderr = math.sqrt(max(failure_rate * (1.0 - failure_rate), 0.0) / actual_sims) * 100.0 if actual_sims > 0 else 0.0
-    median_failure_year = _year_from_month(float(pd.Series(failure_month_arr).dropna().median())) if pd.Series(failure_month_arr).notna().any() else float("nan")
-    median_depletion_year = _year_from_month(float(pd.Series(depletion_month_arr).dropna().median())) if pd.Series(depletion_month_arr).notna().any() else float("nan")
-    median_shortfall_year = _year_from_month(float(pd.Series(shortfall_month_arr).dropna().median())) if pd.Series(shortfall_month_arr).notna().any() else float("nan")
-
-    summary_rows = [
-        ("Simulations Completed", float(actual_sims), "Count"),
-        ("Median Ending Balance", float(np.median(ending_balance_arr)), "USD"),
-        ("Real Median Ending Balance", float(np.median(real_ending_balance_arr)), "USD"),
-        ("10th Percentile Ending Balance", float(np.quantile(ending_balance_arr, 0.10)), "USD"),
-        ("Real 10th Percentile Ending Balance", float(np.quantile(real_ending_balance_arr, 0.10)), "USD"),
-        ("90th Percentile Ending Balance", float(np.quantile(ending_balance_arr, 0.90)), "USD"),
-        ("Real 90th Percentile Ending Balance", float(np.quantile(real_ending_balance_arr, 0.90)), "USD"),
-        ("Failure Rate (Ruin or Shortfall)", failure_rate * 100.0, "%"),
-        ("Failure StdErr", float(failure_stderr), "%"),
-        ("Ruin Rate", float(np.mean(ruin_arr) * 100.0), "%"),
-        ("Spending Shortfall Rate", float(np.mean(shortfall_arr) * 100.0), "%"),
-        ("Median Portfolio CAGR", float(np.nanmedian(cagr_arr)), "%"),
-        ("CVaR 5% Ending Balance", cvar_balance, "USD"),
-        ("Median Minimum Balance", float(np.median(min_balance_arr)), "USD"),
-        ("Median Minimum Real Balance", float(np.median(min_real_balance_arr)), "USD"),
-        ("Median Failure Year (conditional)", median_failure_year, "Years"),
-        ("Median Depletion Year (conditional)", median_depletion_year, "Years"),
-        ("Median Shortfall Year (conditional)", median_shortfall_year, "Years"),
-    ]
-    for checkpoint_year in (10, 20, 30):
-        if checkpoint_year <= horizon_years:
-            summary_rows.append(
-                (
-                    f"Survival Probability Through Year {checkpoint_year}",
-                    float(percentiles_df.loc[percentiles_df["Year"] == checkpoint_year, "Survival Probability (%)"].iloc[0]),
-                    "%",
-                )
-            )
-
-    summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value", "Unit"])
+    summary_df = _build_mc_summary_df(
+        actual_sims=actual_sims,
+        ending_balance_arr=ending_balance_arr,
+        real_ending_balance_arr=real_ending_balance_arr,
+        ruin_arr=ruin_arr,
+        shortfall_arr=shortfall_arr,
+        failure_arr=failure_arr,
+        cagr_arr=cagr_arr,
+        min_balance_arr=min_balance_arr,
+        min_real_balance_arr=min_real_balance_arr,
+        depletion_month_arr=depletion_month_arr,
+        shortfall_month_arr=shortfall_month_arr,
+        failure_month_arr=failure_month_arr,
+        horizon_years=horizon_years,
+        percentiles_df=percentiles_df,
+    )
     convergence_df = _build_mc_convergence_df(
         ending_df,
         step=checkpoint_step,
         quantile_tolerance_pct=quantile_tolerance_pct,
         target_stderr_pct=float(portfolio_inputs.monte_carlo_target_stderr_pct),
     )
+    return percentiles_df, summary_df, paths_df, convergence_df
+
+
+def simulate_monte_carlo_summary(
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    historical_returns_df: pd.DataFrame,
+    historical_dividends_df: pd.DataFrame,
+    start_period: pd.Timestamp,
+) -> pd.DataFrame:
+    _, summary_df, _, _ = _simulate_monte_carlo_internal(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=historical_returns_df,
+        historical_dividends_df=historical_dividends_df,
+        start_period=start_period,
+        summary_only=True,
+    )
+    return summary_df
+
+
+def simulate_monte_carlo(
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    historical_returns_df: pd.DataFrame,
+    historical_dividends_df: pd.DataFrame,
+    start_period: pd.Timestamp,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    percentiles_df, summary_df, paths_df, convergence_df = _simulate_monte_carlo_internal(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=historical_returns_df,
+        historical_dividends_df=historical_dividends_df,
+        start_period=start_period,
+        summary_only=False,
+    )
+    assert percentiles_df is not None and paths_df is not None and convergence_df is not None
     return percentiles_df, summary_df, paths_df, convergence_df

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .models import AssetConfig, PortfolioInputs
-from .monte_carlo import build_forward_assumption_audit, materialize_forward_assumption_overrides, simulate_monte_carlo
+from .monte_carlo import build_forward_assumption_audit, materialize_forward_assumption_overrides, simulate_monte_carlo_summary
 
 
 SUMMARY_METRICS = {
@@ -49,7 +49,7 @@ def _run_mc_summary(
     historical_dividends_df: pd.DataFrame,
     start_period: pd.Timestamp,
 ) -> Dict[str, float]:
-    _, summary_df, _, _ = simulate_monte_carlo(
+    summary_df = simulate_monte_carlo_summary(
         portfolio_inputs=portfolio_inputs,
         assets=assets,
         historical_returns_df=historical_returns_df,
@@ -59,39 +59,38 @@ def _run_mc_summary(
     return _summary_to_dict(summary_df)
 
 
-def _analysis_sims(base_sims: int, *, floor: int = 250, ceiling: int = 800) -> int:
+def _analysis_sims(base_sims: int, *, floor: int = 250, ceiling: int = 800, divisor: int = 4) -> int:
     base_sims = int(max(base_sims, 1))
     if base_sims <= floor:
         return base_sims
-    return int(min(ceiling, max(base_sims // 4, floor)))
+    return int(min(ceiling, max(base_sims // max(divisor, 1), floor)))
 
 
-def _analysis_inputs(portfolio_inputs: PortfolioInputs) -> PortfolioInputs:
+def _analysis_inputs(portfolio_inputs: PortfolioInputs, *, analysis_mode: str = "Full") -> PortfolioInputs:
+    analysis_mode = str(analysis_mode).strip().title() or "Full"
+    if analysis_mode == "Fast":
+        sims = _analysis_sims(int(portfolio_inputs.monte_carlo_sims), floor=100, ceiling=300, divisor=6)
+    else:
+        sims = _analysis_sims(int(portfolio_inputs.monte_carlo_sims), floor=250, ceiling=800, divisor=4)
     return replace(
         portfolio_inputs,
-        monte_carlo_sims=_analysis_sims(int(portfolio_inputs.monte_carlo_sims)),
+        monte_carlo_sims=sims,
         monte_carlo_adaptive_convergence=False,
     )
 
 
-def build_fragility_analysis(
-    *,
-    portfolio_inputs: PortfolioInputs,
-    assets: Sequence[AssetConfig],
-    historical_returns_df: pd.DataFrame,
-    historical_dividends_df: pd.DataFrame,
-    start_period: pd.Timestamp,
-) -> Dict[str, pd.DataFrame]:
-    analysis_inputs = _analysis_inputs(portfolio_inputs)
-    base = _run_mc_summary(
-        analysis_inputs,
-        assets,
-        historical_returns_df,
-        historical_dividends_df,
-        start_period,
-    )
+def _fragility_profile(portfolio_inputs: PortfolioInputs, *, analysis_mode: str) -> tuple[list[tuple[str, dict[str, object]]], tuple[float, ...], tuple[float, ...]]:
+    analysis_mode = str(analysis_mode).strip().title() or "Full"
+    if analysis_mode == "Fast":
+        stress_cases = [
+            ("Base Case", {}),
+            ("Spending +10%", {"withdrawal_rate": float(portfolio_inputs.withdrawal_rate) * 1.10}),
+            ("Fees +0.50%", {"annual_fee_rate": float(portfolio_inputs.annual_fee_rate) + 0.50}),
+            ("Return Shift -2%", {"monte_carlo_return_shift_pct": float(portfolio_inputs.monte_carlo_return_shift_pct) - 2.0}),
+        ]
+        return stress_cases, (-1.0, 0.0, 1.0), (-2.0, 0.0, 2.0)
 
-    stress_cases: List[Tuple[str, Dict[str, object]]] = [
+    stress_cases = [
         ("Base Case", {}),
         ("Spending +10%", {"withdrawal_rate": float(portfolio_inputs.withdrawal_rate) * 1.10}),
         ("Spending -10%", {"withdrawal_rate": max(float(portfolio_inputs.withdrawal_rate) * 0.90, 0.0)}),
@@ -107,6 +106,29 @@ def build_fragility_analysis(
             },
         ),
     ]
+    return stress_cases, (-2.0, -1.0, 0.0, 1.0, 2.0), (-3.0, -1.5, 0.0, 1.5, 3.0)
+
+
+def build_fragility_analysis(
+    *,
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    historical_returns_df: pd.DataFrame,
+    historical_dividends_df: pd.DataFrame,
+    start_period: pd.Timestamp,
+    analysis_mode: str = "Full",
+) -> Dict[str, pd.DataFrame | str]:
+    analysis_mode = str(analysis_mode).strip().title() or "Full"
+    analysis_inputs = _analysis_inputs(portfolio_inputs, analysis_mode=analysis_mode)
+    base = _run_mc_summary(
+        analysis_inputs,
+        assets,
+        historical_returns_df,
+        historical_dividends_df,
+        start_period,
+    )
+
+    stress_cases, wr_deltas, shift_deltas = _fragility_profile(portfolio_inputs, analysis_mode=analysis_mode)
 
     rows: List[Dict[str, float | str]] = []
     for label, overrides in stress_cases:
@@ -174,8 +196,8 @@ def build_fragility_analysis(
         )
 
     explicit_forward = materialize_forward_assumption_overrides(analysis_inputs)
-    wr_levels = sorted({max(float(portfolio_inputs.withdrawal_rate) + delta, 0.0) for delta in (-2.0, -1.0, 0.0, 1.0, 2.0)})
-    shift_levels = sorted({float(portfolio_inputs.monte_carlo_return_shift_pct) + delta for delta in (-3.0, -1.5, 0.0, 1.5, 3.0)})
+    wr_levels = sorted({max(float(portfolio_inputs.withdrawal_rate) + delta, 0.0) for delta in wr_deltas})
+    shift_levels = sorted({float(portfolio_inputs.monte_carlo_return_shift_pct) + delta for delta in shift_deltas})
     grid_rows: List[Dict[str, float]] = []
     for wr in wr_levels:
         for shift in shift_levels:
@@ -214,10 +236,22 @@ def build_fragility_analysis(
         ).sort_index().sort_index(axis=1)
         fragility_pivot_df.index.name = "Withdrawal Rate (%)"
 
+    fragility_settings_df = pd.DataFrame(
+        [
+            {
+                "Fragility Mode": analysis_mode,
+                "Stress Scenario Count": int(max(len(stress_cases) - 1, 0)),
+                "Grid Shape": f"{len(wr_levels)}x{len(shift_levels)}",
+                "MC Sims Per Run": int(analysis_inputs.monte_carlo_sims),
+            }
+        ]
+    )
     return {
         "fragility_df": fragility_df,
         "fragility_grid_df": fragility_grid_df,
         "fragility_pivot_df": fragility_pivot_df,
+        "fragility_settings_df": fragility_settings_df,
+        "fragility_mode": analysis_mode,
     }
 
 

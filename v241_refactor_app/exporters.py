@@ -100,14 +100,20 @@ def _build_run_provenance_df(
     return pd.DataFrame(rows)
 
 
-def _build_decision_settings_df(decision_objective: Optional[str]) -> Optional[pd.DataFrame]:
-    if not decision_objective:
+def _build_decision_settings_df(decision_objective: Optional[str], fragility_settings_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    if not decision_objective and (fragility_settings_df is None or fragility_settings_df.empty):
         return None
-    return pd.DataFrame([{
-        "Decision Objective": str(decision_objective),
+    payload = {
+        "Decision Objective": str(decision_objective) if decision_objective else "Not prepared",
         "Policy Comparison Scope": "Constrained candidate set around current plan",
         "Fragility Grid Notes": "Return-shift axis is forced into explicit custom forward-stress mode.",
-    }])
+    }
+    if fragility_settings_df is not None and not fragility_settings_df.empty:
+        first = fragility_settings_df.iloc[0]
+        payload["Fragility Mode"] = first.get("Fragility Mode", "N/A")
+        payload["Fragility Grid Shape"] = first.get("Grid Shape", "N/A")
+        payload["Fragility MC Sims Per Run"] = first.get("MC Sims Per Run", "N/A")
+    return pd.DataFrame([payload])
 
 
 def export_full_simulation_workbook(
@@ -138,6 +144,7 @@ def export_full_simulation_workbook(
     fragility_pivot_df: Optional[pd.DataFrame] = None,
     policy_df: Optional[pd.DataFrame] = None,
     recommendation_df: Optional[pd.DataFrame] = None,
+    fragility_settings_df: Optional[pd.DataFrame] = None,
     decision_objective: Optional[str] = None,
 ) -> bytes:
     buffer = io.BytesIO()
@@ -158,7 +165,7 @@ def export_full_simulation_workbook(
         fragility_df=fragility_df,
         recommendation_df=recommendation_df,
     )
-    decision_settings_df = _build_decision_settings_df(decision_objective)
+    decision_settings_df = _build_decision_settings_df(decision_objective, fragility_settings_df)
 
     sheets = [
         ("Summary Metrics", metrics_df, False),
@@ -183,6 +190,7 @@ def export_full_simulation_workbook(
         ("Data Diagnostics", diagnostics_df, False),
         ("Forward Audit", forward_audit_df, False),
         ("Decision Lab Settings", decision_settings_df, False),
+        ("Fragility Settings", fragility_settings_df, False),
         ("Fragility Summary", fragility_df, False),
         ("Fragility Matrix", fragility_pivot_df, True),
         ("Policy Comparison", policy_df, False),

@@ -7,7 +7,7 @@ import pandas.testing as pdt
 from v241_refactor_app.engine import _apply_withdrawal_trade, maybe_rebalance, run_historical_simulation, simulate_portfolio
 from v241_refactor_app.mc_kernel import build_mc_path_plan, simulate_portfolio_path
 from v241_refactor_app.models import HistoricalSelection
-from v241_refactor_app.monte_carlo import simulate_monte_carlo
+from v241_refactor_app.monte_carlo import simulate_monte_carlo, simulate_monte_carlo_summary
 
 from conftest import make_assets, make_portfolio_inputs
 
@@ -679,3 +679,86 @@ def test_export_signature_changes_when_decision_lab_state_changes():
 
     assert base != with_fragility
     assert with_fragility != with_decision
+
+
+
+def test_summary_only_monte_carlo_matches_full_summary(base_inputs, base_assets, base_dataset):
+    selection = run_historical_simulation(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+    _, full_summary_df, _, _ = simulate_monte_carlo(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+    summary_only_df = simulate_monte_carlo_summary(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+    )
+
+    merged = full_summary_df.merge(summary_only_df, on=["Metric", "Unit"], suffixes=("_full", "_summary"))
+    compare_metrics = [
+        "Median Ending Balance",
+        "Real Median Ending Balance",
+        "10th Percentile Ending Balance",
+        "Real 10th Percentile Ending Balance",
+        "90th Percentile Ending Balance",
+        "Real 90th Percentile Ending Balance",
+        "Failure Rate (Ruin or Shortfall)",
+        "Failure StdErr",
+        "Ruin Rate",
+        "Spending Shortfall Rate",
+        "Median Portfolio CAGR",
+        "CVaR 5% Ending Balance",
+        "Median Minimum Balance",
+        "Median Minimum Real Balance",
+        "Median Failure Year (conditional)",
+        "Median Depletion Year (conditional)",
+        "Median Shortfall Year (conditional)",
+    ]
+    merged = merged[merged["Metric"].isin(compare_metrics)].copy()
+    assert not merged.empty
+    assert np.allclose(merged["Value_full"].to_numpy(dtype=float), merged["Value_summary"].to_numpy(dtype=float), atol=1e-12, rtol=0.0, equal_nan=True)
+
+
+
+def test_fragility_fast_mode_uses_smaller_surface(base_inputs, base_assets, base_dataset):
+    from v241_refactor_app.analysis_lab import build_fragility_analysis
+
+    selection = run_historical_simulation(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        dataset=base_dataset,
+        selected_range=(2020, 2021),
+    )
+    full_outputs = build_fragility_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+        analysis_mode="Full",
+    )
+    fast_outputs = build_fragility_analysis(
+        portfolio_inputs=base_inputs,
+        assets=base_assets,
+        historical_returns_df=selection.selected_returns_df,
+        historical_dividends_df=selection.selected_divs_df,
+        start_period=selection.filtered_periods[0],
+        analysis_mode="Fast",
+    )
+
+    assert fast_outputs.get("fragility_mode") == "Fast"
+    assert full_outputs.get("fragility_mode") == "Full"
+    assert len(fast_outputs["fragility_df"]) < len(full_outputs["fragility_df"])
+    assert len(fast_outputs["fragility_grid_df"]) < len(full_outputs["fragility_grid_df"])
+    assert tuple(fast_outputs["fragility_pivot_df"].shape) == (3, 3)
+    assert tuple(full_outputs["fragility_pivot_df"].shape) == (5, 5)

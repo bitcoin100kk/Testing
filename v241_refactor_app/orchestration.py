@@ -81,7 +81,8 @@ def build_fragility_artifacts_cached(
     selected_returns_df: pd.DataFrame,
     selected_divs_df: pd.DataFrame,
     start_period: pd.Timestamp,
-) -> Dict[str, pd.DataFrame]:
+    fragility_mode: str = "Full",
+) -> Dict[str, object]:
     portfolio_inputs = deserialize_portfolio_inputs(portfolio_input_dict)
     assets = deserialize_assets(asset_specs)
     return build_fragility_analysis(
@@ -90,6 +91,7 @@ def build_fragility_artifacts_cached(
         historical_returns_df=selected_returns_df,
         historical_dividends_df=selected_divs_df,
         start_period=start_period,
+        analysis_mode=fragility_mode,
     )
 
 
@@ -396,6 +398,7 @@ def build_export_bytes_cached(
     fragility_pivot_df: Optional[pd.DataFrame] = None,
     policy_df: Optional[pd.DataFrame] = None,
     recommendation_df: Optional[pd.DataFrame] = None,
+    fragility_settings_df: Optional[pd.DataFrame] = None,
     decision_objective: Optional[str] = None,
 ) -> bytes:
     portfolio_inputs = deserialize_portfolio_inputs(portfolio_input_dict)
@@ -432,6 +435,7 @@ def build_export_bytes_cached(
         fragility_pivot_df=fragility_pivot_df if fragility_pivot_df is not None and not fragility_pivot_df.empty else None,
         policy_df=policy_df if policy_df is not None and not policy_df.empty else None,
         recommendation_df=recommendation_df if recommendation_df is not None and not recommendation_df.empty else None,
+        fragility_settings_df=fragility_settings_df if fragility_settings_df is not None and not fragility_settings_df.empty else None,
         decision_objective=decision_objective,
     )
 

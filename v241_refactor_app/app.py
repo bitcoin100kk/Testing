@@ -873,9 +873,18 @@ def main() -> None:
             st.dataframe(forward_audit_df, use_container_width=True)
 
             fragility_subtab, decision_subtab = st.tabs(["Fragility", "Policy Comparison"])
-            fragility_signature = build_raw_signature({"kind": "fragility", "core": active_core_signature, "year_range": list(year_range)})
             with fragility_subtab:
-                st.caption("Fragility runs use a reduced simulation count on purpose so they behave like a fast sensitivity lab rather than a second full Monte Carlo stack.")
+                fragility_mode = st.selectbox(
+                    "Fragility Mode",
+                    ["Fast", "Full"],
+                    index=["Fast", "Full"].index(st.session_state.get("fragility_mode", "Fast")),
+                    key="fragility_mode",
+                )
+                fragility_signature = build_raw_signature({"kind": "fragility", "core": active_core_signature, "year_range": list(year_range), "mode": fragility_mode})
+                if fragility_mode == "Fast":
+                    st.caption("Fast mode uses a smaller simulation budget, fewer stress cases, and a 3x3 grid so fragility behaves like a quick sensitivity lab.")
+                else:
+                    st.caption("Full mode runs the broader ranked stress set and 5x5 fragility grid using a reduced but richer Monte Carlo budget.")
                 if st.button("Build fragility analysis", key="build_fragility_layer"):
                     with st.spinner("Running fragility sweeps..."):
                         fragility_outputs = orch.build_fragility_artifacts_cached(
@@ -884,6 +893,7 @@ def main() -> None:
                             selected_returns_df=core_artifacts.selection.selected_returns_df,
                             selected_divs_df=core_artifacts.selection.selected_divs_df,
                             start_period=core_artifacts.selection.filtered_periods[0],
+                            fragility_mode=fragility_mode,
                         )
                     store_bucket_artifact("fragility", fragility_signature, fragility_outputs)
                 fragility_outputs = get_bucket_artifact("fragility", fragility_signature)
@@ -895,6 +905,9 @@ def main() -> None:
                         delta_cols = [col for col in fragility_df.columns if col.startswith("Delta vs Base ::")][:4]
                         if delta_cols:
                             st.bar_chart(fragility_df.set_index("Scenario")[delta_cols])
+                    fragility_settings_df = fragility_outputs.get("fragility_settings_df")
+                    if isinstance(fragility_settings_df, pd.DataFrame) and not fragility_settings_df.empty:
+                        st.dataframe(fragility_settings_df, use_container_width=True)
                     if isinstance(fragility_pivot_df, pd.DataFrame) and not fragility_pivot_df.empty:
                         st.subheader("Failure-rate matrix: withdrawal rate vs explicit forward return shift")
                         st.dataframe(fragility_pivot_df, use_container_width=True)
@@ -999,6 +1012,7 @@ def main() -> None:
                         selected_returns_df=core_artifacts.selection.selected_returns_df,
                         selected_divs_df=core_artifacts.selection.selected_divs_df,
                         start_period=core_artifacts.selection.filtered_periods[0],
+                        fragility_mode=st.session_state.get("fragility_mode", "Fast"),
                     )
                     store_bucket_artifact("fragility", fragility_signature, fragility_outputs)
 
@@ -1051,6 +1065,7 @@ def main() -> None:
                         fragility_pivot_df=fragility_outputs.get("fragility_pivot_df") if isinstance(fragility_outputs, dict) else None,
                         policy_df=decision_outputs.get("policy_df") if isinstance(decision_outputs, dict) else None,
                         recommendation_df=decision_outputs.get("recommendation_df") if isinstance(decision_outputs, dict) else None,
+                        fragility_settings_df=fragility_outputs.get("fragility_settings_df") if isinstance(fragility_outputs, dict) else None,
                         decision_objective=decision_objective,
                     )
                     store_bucket_artifact("export", export_signature, export_bytes)
