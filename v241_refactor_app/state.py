@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Sequence, Tuple
 
-import streamlit as st
+from .streamlit_compat import st
 
 ARTIFACT_BUCKETS = ("core", "benchmark", "scenario", "mc", "fragility", "decision", "export")
 MAX_BUCKET_ITEMS = 12

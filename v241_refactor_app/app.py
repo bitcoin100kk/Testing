@@ -5,7 +5,7 @@ from dataclasses import asdict
 from typing import Dict, List
 
 import pandas as pd
-import streamlit as st
+from .streamlit_compat import st
 
 from . import orchestration as orch
 from .analytics import build_overlap_warning_lines
@@ -666,12 +666,13 @@ def main() -> None:
             benchmark_summary_table = cached_benchmark.get("summary_table")
 
         cached_mc = get_bucket_artifact("mc", mc_signature)
-        mc_percentiles = mc_summary = mc_paths = mc_convergence = None
+        mc_percentiles = mc_summary = mc_paths = mc_convergence = mc_validation = None
         if isinstance(cached_mc, dict):
             mc_percentiles = cached_mc.get("percentiles_df")
             mc_summary = cached_mc.get("summary_df")
             mc_paths = cached_mc.get("paths_df")
             mc_convergence = cached_mc.get("convergence_df")
+            mc_validation = cached_mc.get("validation_df")
 
         cached_scenario = get_bucket_artifact("scenario", scenario_signature)
         scenario_comparison_df = cached_scenario if isinstance(cached_scenario, pd.DataFrame) else None
@@ -825,6 +826,7 @@ def main() -> None:
                     mc_summary = mc_outputs.get("summary_df")
                     mc_paths = mc_outputs.get("paths_df")
                     mc_convergence = mc_outputs.get("convergence_df")
+                    mc_validation = mc_outputs.get("validation_df")
                     store_bucket_artifact("mc", mc_signature, mc_outputs)
                 elif mc_percentiles is None or mc_summary is None:
                     st.info("Historical results are already ready. Monte Carlo runs separately so the overview and benchmark tabs do not wait on the full simulation count.")
@@ -852,6 +854,12 @@ def main() -> None:
                         axis=1,
                     )
                     st.dataframe(summary_display[["Metric", "Display Value"]], use_container_width=True)
+                    if mc_validation is not None and not mc_validation.empty:
+                        st.subheader("Monte Carlo Validation")
+                        status_row = mc_validation.loc[mc_validation["Metric"].eq("Convergence status")]
+                        if not status_row.empty:
+                            st.caption(f"Validation status: {status_row.iloc[0]['Value']}")
+                        st.dataframe(mc_validation, use_container_width=True)
                     if mc_convergence is not None and not mc_convergence.empty:
                         st.subheader("Monte Carlo Convergence")
                         st.line_chart(mc_convergence.set_index("Sim Count")[["P05 Ending Balance", "Median Ending Balance", "P95 Ending Balance"]])
@@ -1002,6 +1010,7 @@ def main() -> None:
                     mc_summary = mc_outputs.get("summary_df")
                     mc_paths = mc_outputs.get("paths_df")
                     mc_convergence = mc_outputs.get("convergence_df")
+                    mc_validation = mc_outputs.get("validation_df")
                     store_bucket_artifact("mc", mc_signature, mc_outputs)
 
                 fragility_outputs = get_bucket_artifact("fragility", fragility_signature)
@@ -1060,6 +1069,7 @@ def main() -> None:
                         mc_summary_df=mc_summary,
                         mc_paths_df=mc_paths,
                         mc_convergence_df=mc_convergence,
+                        mc_validation_df=mc_validation,
                         scenario_comparison_df=scenario_comparison_df,
                         fragility_df=fragility_outputs.get("fragility_df") if isinstance(fragility_outputs, dict) else None,
                         fragility_pivot_df=fragility_outputs.get("fragility_pivot_df") if isinstance(fragility_outputs, dict) else None,

@@ -190,4 +190,5 @@ class RunArtifacts:
     mc_summary: Optional[pd.DataFrame] = None
     mc_paths: Optional[pd.DataFrame] = None
     mc_convergence: Optional[pd.DataFrame] = None
+    mc_validation: Optional[pd.DataFrame] = None
     export_bytes: Optional[bytes] = None

@@ -6,6 +6,7 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .decision_engine import OBJECTIVE_SPECS, rank_policy_candidates
 from .models import AssetConfig, PortfolioInputs
 from .monte_carlo import build_forward_assumption_audit, materialize_forward_assumption_overrides, simulate_monte_carlo_summary
 
@@ -180,18 +181,20 @@ def build_fragility_analysis(
             "Median CAGR (%)",
         ]:
             fragility_df[f"Delta vs Base :: {col}"] = fragility_df[col] - float(base_row[col])
-        fragility_scale = max(abs(float(base_row["Real P10 Ending Balance (USD)"])), abs(float(base_row["Real Median Ending Balance (USD)"])), 25000.0)
-        fragility_df["Fragility Score (heuristic)"] = np.where(
-            fragility_df["Scenario"].eq("Base Case"),
-            0.0,
-            (
-                fragility_df["Delta vs Base :: Failure Rate (%)"].abs() * 4.0
-                + (fragility_df["Delta vs Base :: Real P10 Ending Balance (USD)"].abs() / fragility_scale) * 100.0
-            ),
-        )
-        fragility_df["Fragility Rank"] = fragility_df["Fragility Score (heuristic)"]
+        fragility_df["Abs Failure Shock (pp)"] = fragility_df["Delta vs Base :: Failure Rate (%)"].abs()
+        fragility_df["Abs Real P10 Shock (USD)"] = fragility_df["Delta vs Base :: Real P10 Ending Balance (USD)"].abs()
+        fragility_df["Abs Real Median Shock (USD)"] = fragility_df["Delta vs Base :: Real Median Ending Balance (USD)"].abs()
+        base_mask = fragility_df["Scenario"].eq("Base Case")
+        fragility_df["Fragility Priority Rank"] = 0
+        fragility_df["Fragility Rank"] = 0
+        ranked_non_base = fragility_df.loc[~base_mask].sort_values(
+            ["Abs Failure Shock (pp)", "Abs Real P10 Shock (USD)", "Abs Real Median Shock (USD)"],
+            ascending=[False, False, False],
+        ).copy()
+        ranked_non_base["Fragility Priority Rank"] = np.arange(1, len(ranked_non_base) + 1, dtype=int)
+        ranked_non_base["Fragility Rank"] = ranked_non_base["Fragility Priority Rank"]
         fragility_df = pd.concat(
-            [fragility_df.iloc[[0]], fragility_df.iloc[1:].sort_values("Fragility Score (heuristic)", ascending=False)],
+            [fragility_df.loc[base_mask], ranked_non_base],
             ignore_index=True,
         )
 
@@ -301,17 +304,6 @@ def _policy_candidates(portfolio_inputs: PortfolioInputs) -> List[Tuple[str, Por
     return unique
 
 
-def _robustness_score(row: pd.Series, initial_investment: float) -> float:
-    failure_component = max(0.0, 100.0 - float(row["Failure Rate (%)"])) * 0.45
-    ruin_component = max(0.0, 100.0 - float(row["Ruin Rate (%)"])) * 0.15
-    shortfall_component = max(0.0, 100.0 - float(row["Shortfall Rate (%)"])) * 0.15
-    p10_component = max(float(row["Real P10 Ending Balance (USD)"]), 0.0) / max(float(initial_investment), 1.0)
-    p10_component = min(p10_component, 3.0) * 8.0
-    median_component = max(float(row["Real Median Ending Balance (USD)"]), 0.0) / max(float(initial_investment), 1.0)
-    median_component = min(median_component, 5.0) * 3.0
-    return float(failure_component + ruin_component + shortfall_component + p10_component + median_component)
-
-
 def build_decision_policy_analysis(
     *,
     portfolio_inputs: PortfolioInputs,
@@ -350,45 +342,28 @@ def build_decision_policy_analysis(
     if policy_df.empty:
         return {"policy_df": policy_df, "recommendation_df": pd.DataFrame(), "recommendation_text": "No policy candidates available."}
 
-    policy_df["Robustness Score"] = policy_df.apply(_robustness_score, axis=1, initial_investment=float(portfolio_inputs.initial_investment))
-
     objective = str(objective)
-    if objective == "Maximize legacy":
-        ranked = policy_df.sort_values(
-            ["Real Median Ending Balance (USD)", "Real P10 Ending Balance (USD)", "Failure Rate (%)"],
-            ascending=[False, False, True],
-        )
-    elif objective == "Maximize downside resilience":
-        ranked = policy_df.sort_values(
-            ["Real P10 Ending Balance (USD)", "Failure Rate (%)", "Real Median Ending Balance (USD)"],
-            ascending=[False, True, False],
-        )
-    elif objective == "Balanced robustness":
-        ranked = policy_df.sort_values(["Robustness Score", "Failure Rate (%)"], ascending=[False, True])
-    else:
-        ranked = policy_df.sort_values(
-            ["Failure Rate (%)", "Real P10 Ending Balance (USD)", "Real Median Ending Balance (USD)"],
-            ascending=[True, False, False],
-        )
-
-    ranked = ranked.reset_index(drop=True)
-    ranked.insert(0, "Rank", np.arange(1, len(ranked) + 1, dtype=int))
-    winner = ranked.iloc[0]
+    ranked, winner, objective_spec = rank_policy_candidates(policy_df, objective=objective)
+    ranked.insert(0, "Rank", ranked["Objective Rank"].astype(int))
     current = ranked.loc[ranked["Policy"].eq("Current")].iloc[0] if ranked["Policy"].eq("Current").any() else winner
     recommendation_text = (
         f"Best policy for {objective.lower()}: {winner['Policy']}. "
+        f"Basis: {objective_spec.recommendation_basis} "
         f"Failure rate {winner['Failure Rate (%)']:.2f}% vs current {current['Failure Rate (%)']:.2f}%; "
         f"real median ending balance ${winner['Real Median Ending Balance (USD)']:,.0f} vs current ${current['Real Median Ending Balance (USD)']:,.0f}."
     )
     recommendation_df = pd.DataFrame(
         [
             {
-                "Objective": objective,
+                "Objective": objective_spec.name,
+                "Objective Description": objective_spec.description,
+                "Recommendation Basis": objective_spec.recommendation_basis,
                 "Recommended Policy": winner["Policy"],
+                "Pareto Efficient": bool(winner["Pareto Efficient"]),
                 "Failure Improvement vs Current (pp)": float(current["Failure Rate (%)"]) - float(winner["Failure Rate (%)"]),
                 "Real Median Improvement vs Current (USD)": float(winner["Real Median Ending Balance (USD)"]) - float(current["Real Median Ending Balance (USD)"]),
                 "Real P10 Improvement vs Current (USD)": float(winner["Real P10 Ending Balance (USD)"]) - float(current["Real P10 Ending Balance (USD)"]),
-                "Robustness Score": float(winner["Robustness Score"]),
+                "Objective Rank": int(winner["Objective Rank"]),
             }
         ]
     )

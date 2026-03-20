@@ -6,7 +6,9 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from .decision_engine import OBJECTIVE_SPECS
 from .models import AssetConfig, PortfolioInputs
+from .version import APP_BUILD, __version__
 
 
 def simulation_to_csv(results_df: pd.DataFrame) -> bytes:
@@ -73,6 +75,8 @@ def _build_run_provenance_df(
 
     rows = [
         {"Section": "Run", "Field": "Selected Year Range", "Value": f"{int(year_range[0])}-{int(year_range[1])}"},
+        {"Section": "Run", "Field": "App Version", "Value": __version__},
+        {"Section": "Run", "Field": "Build", "Value": APP_BUILD},
         {"Section": "Data", "Field": "Overlap Window", "Value": f"{overlap_start} to {overlap_end}" if overlap_start and overlap_end else "N/A"},
         {"Section": "Data", "Field": "Overlap Months", "Value": int(overlap_months)},
         {"Section": "Data", "Field": "Data Sources Used", "Value": data_sources or "N/A"},
@@ -103,8 +107,12 @@ def _build_run_provenance_df(
 def _build_decision_settings_df(decision_objective: Optional[str], fragility_settings_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     if not decision_objective and (fragility_settings_df is None or fragility_settings_df.empty):
         return None
+    objective_name = str(decision_objective) if decision_objective else "Not prepared"
+    objective_spec = OBJECTIVE_SPECS.get(objective_name)
     payload = {
-        "Decision Objective": str(decision_objective) if decision_objective else "Not prepared",
+        "Decision Objective": objective_name,
+        "Objective Description": objective_spec.description if objective_spec else "Not prepared",
+        "Recommendation Basis": objective_spec.recommendation_basis if objective_spec else "Not prepared",
         "Policy Comparison Scope": "Constrained candidate set around current plan",
         "Fragility Grid Notes": "Return-shift axis is forced into explicit custom forward-stress mode.",
     }
@@ -138,6 +146,7 @@ def export_full_simulation_workbook(
     mc_summary_df: Optional[pd.DataFrame] = None,
     mc_paths_df: Optional[pd.DataFrame] = None,
     mc_convergence_df: Optional[pd.DataFrame] = None,
+    mc_validation_df: Optional[pd.DataFrame] = None,
     scenario_comparison_df: Optional[pd.DataFrame] = None,
     forward_audit_df: Optional[pd.DataFrame] = None,
     fragility_df: Optional[pd.DataFrame] = None,
@@ -199,6 +208,7 @@ def export_full_simulation_workbook(
         ("Monte Carlo Summary", mc_summary_df, False),
         ("Monte Carlo Paths", mc_paths_df, False),
         ("Monte Carlo Convergence", mc_convergence_df, False),
+        ("Monte Carlo Validation", mc_validation_df, False),
     ]
 
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:

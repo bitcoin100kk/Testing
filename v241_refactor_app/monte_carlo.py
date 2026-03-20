@@ -851,6 +851,142 @@ def simulate_monte_carlo_summary(
     return summary_df
 
 
+def _summary_metric_value(summary_df: pd.DataFrame, metric: str, default: float = float("nan")) -> float:
+    if summary_df is None or summary_df.empty:
+        return default
+    match = summary_df.loc[summary_df["Metric"].eq(metric), "Value"]
+    if match.empty:
+        return default
+    return float(match.iloc[0])
+
+
+def _wilson_interval(success_rate: float, n: int, *, z: float = 1.959963984540054) -> tuple[float, float]:
+    n = int(max(n, 0))
+    if n <= 0:
+        return float("nan"), float("nan")
+    p_hat = min(max(float(success_rate), 0.0), 1.0)
+    denom = 1.0 + (z * z) / n
+    center = (p_hat + (z * z) / (2.0 * n)) / denom
+    spread = (z / denom) * math.sqrt((p_hat * (1.0 - p_hat) / n) + ((z * z) / (4.0 * n * n)))
+    return max(0.0, center - spread), min(1.0, center + spread)
+
+
+def _bootstrap_stat_interval(values: np.ndarray, stat_fn, *, seed: int, n_resamples: int = 250) -> tuple[float, float]:
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return float("nan"), float("nan")
+    if arr.size == 1:
+        val = float(stat_fn(arr))
+        return val, val
+    rng = np.random.default_rng(seed)
+    stats = np.empty(n_resamples, dtype=float)
+    for i in range(n_resamples):
+        sample = rng.choice(arr, size=arr.size, replace=True)
+        stats[i] = float(stat_fn(sample))
+    return float(np.quantile(stats, 0.025)), float(np.quantile(stats, 0.975))
+
+
+def build_monte_carlo_validation_report(
+    *,
+    portfolio_inputs: PortfolioInputs,
+    assets: Sequence[AssetConfig],
+    historical_returns_df: pd.DataFrame,
+    historical_dividends_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    paths_df: pd.DataFrame,
+    convergence_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame(columns=["Metric", "Value", "Unit", "Assessment"])
+
+    requested_sims = int(max(getattr(portfolio_inputs, "monte_carlo_sims", 0), 0))
+    actual_sims = int(round(_summary_metric_value(summary_df, "Simulations Completed", 0.0)))
+    failure_rate_pct = _summary_metric_value(summary_df, "Failure Rate (Ruin or Shortfall)", 0.0)
+    ruin_rate_pct = _summary_metric_value(summary_df, "Ruin Rate", 0.0)
+    shortfall_rate_pct = _summary_metric_value(summary_df, "Spending Shortfall Rate", 0.0)
+    real_median_pct = _summary_metric_value(summary_df, "Real Median Ending Balance", float("nan"))
+    real_p10_pct = _summary_metric_value(summary_df, "Real 10th Percentile Ending Balance", float("nan"))
+
+    failure_low, failure_high = _wilson_interval(failure_rate_pct / 100.0, actual_sims)
+    ruin_low, ruin_high = _wilson_interval(ruin_rate_pct / 100.0, actual_sims)
+    shortfall_low, shortfall_high = _wilson_interval(shortfall_rate_pct / 100.0, actual_sims)
+
+    final_year = int(paths_df["Year"].max()) if paths_df is not None and not paths_df.empty else 0
+    final_real_balances = np.array([], dtype=float)
+    if paths_df is not None and not paths_df.empty and final_year > 0:
+        final_real_balances = paths_df.loc[paths_df["Year"].eq(final_year), "Real Balance (USD)"].to_numpy(dtype=float)
+    median_low, median_high = _bootstrap_stat_interval(
+        final_real_balances,
+        np.median,
+        seed=int(getattr(portfolio_inputs, "monte_carlo_seed", 0)) + 17,
+    )
+    p10_low, p10_high = _bootstrap_stat_interval(
+        final_real_balances,
+        lambda arr: np.quantile(arr, 0.10),
+        seed=int(getattr(portfolio_inputs, "monte_carlo_seed", 0)) + 31,
+    )
+
+    weights = np.array([float(asset.allocation) / 100.0 for asset in assets], dtype=float)
+    joint_total_return_series = historical_returns_df.add(historical_dividends_df, fill_value=0.0).mul(weights, axis=1).sum(axis=1)
+    regime_scores = _build_regime_scores(
+        portfolio_total_return_series=joint_total_return_series,
+        block_size=int(portfolio_inputs.monte_carlo_block_size_months),
+        regime_window_months=int(portfolio_inputs.monte_carlo_regime_window_months),
+    )
+    start_probabilities = _build_regime_start_probabilities(
+        regime_scores=regime_scores,
+        regime_mode=str(portfolio_inputs.monte_carlo_regime_mode),
+        regime_strength=float(portfolio_inputs.monte_carlo_regime_strength),
+    )
+    n_obs = len(historical_returns_df)
+    entropy_ratio = 1.0
+    effective_start_months = float(n_obs)
+    if start_probabilities is not None and len(start_probabilities) > 0:
+        probs = np.asarray(start_probabilities, dtype=float)
+        probs = probs[probs > 0.0]
+        if probs.size > 0:
+            entropy_ratio = float(-(probs * np.log(probs)).sum() / max(math.log(len(start_probabilities)), 1e-12))
+            effective_start_months = float(1.0 / np.square(probs).sum())
+
+    final_failure_stderr = float("nan")
+    final_quantile_drift = float("nan")
+    stop_eligible = False
+    if convergence_df is not None and not convergence_df.empty:
+        latest = convergence_df.iloc[-1]
+        final_failure_stderr = float(latest.get("Failure StdErr (%)", float("nan")))
+        final_quantile_drift = float(latest.get("Max Quantile Drift (%)", float("nan")))
+        stop_eligible = bool(latest.get("Stop Eligible", False))
+
+    target_stderr_pct = float(getattr(portfolio_inputs, "monte_carlo_target_stderr_pct", 0.0))
+    rows = [
+        {"Metric": "Convergence status", "Value": "Pass" if stop_eligible or actual_sims >= requested_sims else "Monitor", "Unit": "", "Assessment": "Pass means the final checkpoint met either the requested simulation count or the configured stopping rule."},
+        {"Metric": "Requested simulations", "Value": requested_sims, "Unit": "Count", "Assessment": "Configured Monte Carlo budget."},
+        {"Metric": "Completed simulations", "Value": actual_sims, "Unit": "Count", "Assessment": "Actual number of simulated paths used in the report."},
+        {"Metric": "Simulation utilization", "Value": (actual_sims / requested_sims * 100.0) if requested_sims > 0 else float("nan"), "Unit": "%", "Assessment": "Low utilization means adaptive convergence stopped the run early."},
+        {"Metric": "Failure rate 95% CI lower", "Value": failure_low * 100.0, "Unit": "%", "Assessment": "Wilson interval for terminal failure probability."},
+        {"Metric": "Failure rate 95% CI upper", "Value": failure_high * 100.0, "Unit": "%", "Assessment": "Wilson interval for terminal failure probability."},
+        {"Metric": "Ruin rate 95% CI lower", "Value": ruin_low * 100.0, "Unit": "%", "Assessment": "Wilson interval for terminal ruin probability."},
+        {"Metric": "Ruin rate 95% CI upper", "Value": ruin_high * 100.0, "Unit": "%", "Assessment": "Wilson interval for terminal ruin probability."},
+        {"Metric": "Shortfall rate 95% CI lower", "Value": shortfall_low * 100.0, "Unit": "%", "Assessment": "Wilson interval for terminal spending-shortfall probability."},
+        {"Metric": "Shortfall rate 95% CI upper", "Value": shortfall_high * 100.0, "Unit": "%", "Assessment": "Wilson interval for terminal spending-shortfall probability."},
+        {"Metric": "Real median ending balance 95% CI lower", "Value": median_low, "Unit": "USD", "Assessment": "Bootstrap interval across simulated terminal real balances."},
+        {"Metric": "Real median ending balance 95% CI upper", "Value": median_high, "Unit": "USD", "Assessment": "Bootstrap interval across simulated terminal real balances."},
+        {"Metric": "Real P10 ending balance 95% CI lower", "Value": p10_low, "Unit": "USD", "Assessment": "Bootstrap interval across simulated terminal real balances."},
+        {"Metric": "Real P10 ending balance 95% CI upper", "Value": p10_high, "Unit": "USD", "Assessment": "Bootstrap interval across simulated terminal real balances."},
+        {"Metric": "Final failure stderr", "Value": final_failure_stderr, "Unit": "%", "Assessment": "Sampling error at the final convergence checkpoint."},
+        {"Metric": "Target failure stderr", "Value": target_stderr_pct, "Unit": "%", "Assessment": "Configured convergence target for failure-rate error."},
+        {"Metric": "Final max quantile drift", "Value": final_quantile_drift, "Unit": "%", "Assessment": "Largest checkpoint-over-checkpoint drift across P05/Median/P95 ending balance."},
+        {"Metric": "Effective distinct start months", "Value": effective_start_months, "Unit": "Count", "Assessment": "Inverse Herfindahl measure of how concentrated the regime tilt makes start-block selection."},
+        {"Metric": "Start-weight entropy", "Value": entropy_ratio * 100.0, "Unit": "%", "Assessment": "100% means near-uniform block starts; lower values mean heavier concentration on selected regimes."},
+        {"Metric": "Historical months available", "Value": n_obs, "Unit": "Count", "Assessment": "Amount of monthly history available for bootstrap sampling."},
+        {"Metric": "Monte Carlo horizon", "Value": int(getattr(portfolio_inputs, "monte_carlo_years", 0)) * 12, "Unit": "Months", "Assessment": "Simulated investment horizon length."},
+        {"Metric": "Point estimate :: real median ending balance", "Value": real_median_pct, "Unit": "USD", "Assessment": "Point estimate shown in the summary table."},
+        {"Metric": "Point estimate :: real P10 ending balance", "Value": real_p10_pct, "Unit": "USD", "Assessment": "Point estimate shown in the summary table."},
+    ]
+    return pd.DataFrame(rows, columns=["Metric", "Value", "Unit", "Assessment"])
+
+
 def simulate_monte_carlo(
     portfolio_inputs: PortfolioInputs,
     assets: Sequence[AssetConfig],
@@ -868,3 +1004,12 @@ def simulate_monte_carlo(
     )
     assert percentiles_df is not None and paths_df is not None and convergence_df is not None
     return percentiles_df, summary_df, paths_df, convergence_df
+
+
+__all__ = [
+    "build_forward_assumption_audit",
+    "build_monte_carlo_validation_report",
+    "materialize_forward_assumption_overrides",
+    "simulate_monte_carlo",
+    "simulate_monte_carlo_summary",
+]

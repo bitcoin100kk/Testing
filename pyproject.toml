@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retirement-planning-lab"
+version = "2.45.0"
+description = "Retirement planning lab with historical simulation, Monte Carlo validation, and decision analysis."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "requests>=2.31",
+  "streamlit>=1.30",
+  "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["v241_refactor_app*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"

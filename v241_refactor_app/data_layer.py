@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import requests
-import streamlit as st
+from .streamlit_compat import st
 
 from .config import (
     BASE_CRYPTO_URL,

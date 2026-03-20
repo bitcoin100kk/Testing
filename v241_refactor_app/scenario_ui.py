@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Dict, List, Sequence, Tuple
 
-import streamlit as st
+from .streamlit_compat import st
 
 from .config import MAX_SCENARIOS
 from .models import AssetConfig, PortfolioInputs

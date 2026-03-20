@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+from .streamlit_compat import st
 
 from .analytics import (
     build_overlap_summary_df,
@@ -18,7 +18,7 @@ from .data_layer import prepare_historical_dataset
 from .engine import run_historical_simulation
 from .exporters import export_full_simulation_workbook
 from .models import AssetConfig, HistoricalSelection, PortfolioInputs, RunArtifacts, RunSnapshot
-from .monte_carlo import build_forward_assumption_audit, simulate_monte_carlo
+from .monte_carlo import build_forward_assumption_audit, build_monte_carlo_validation_report, simulate_monte_carlo
 from .utils import (
     build_core_signature,
     deserialize_assets,
@@ -64,11 +64,21 @@ def simulate_monte_carlo_cached(
         historical_dividends_df=selected_divs_df,
         start_period=start_period,
     )
+    validation_df = build_monte_carlo_validation_report(
+        portfolio_inputs=portfolio_inputs,
+        assets=assets,
+        historical_returns_df=selected_returns_df,
+        historical_dividends_df=selected_divs_df,
+        summary_df=summary_df,
+        paths_df=paths_df,
+        convergence_df=convergence_df,
+    )
     return {
         "percentiles_df": percentiles_df,
         "summary_df": summary_df,
         "paths_df": paths_df,
         "convergence_df": convergence_df,
+        "validation_df": validation_df,
     }
 
 
@@ -393,6 +403,7 @@ def build_export_bytes_cached(
     mc_summary_df: Optional[pd.DataFrame] = None,
     mc_paths_df: Optional[pd.DataFrame] = None,
     mc_convergence_df: Optional[pd.DataFrame] = None,
+    mc_validation_df: Optional[pd.DataFrame] = None,
     scenario_comparison_df: Optional[pd.DataFrame] = None,
     fragility_df: Optional[pd.DataFrame] = None,
     fragility_pivot_df: Optional[pd.DataFrame] = None,
@@ -429,6 +440,7 @@ def build_export_bytes_cached(
         mc_summary_df=mc_summary_df,
         mc_paths_df=mc_paths_df,
         mc_convergence_df=mc_convergence_df,
+        mc_validation_df=mc_validation_df if mc_validation_df is not None and not mc_validation_df.empty else None,
         scenario_comparison_df=scenario_comparison_df,
         forward_audit_df=forward_audit_df if forward_audit_df is not None and not forward_audit_df.empty else None,
         fragility_df=fragility_df if fragility_df is not None and not fragility_df.empty else None,
@@ -462,13 +474,14 @@ def build_run_artifacts(
         results_df=artifacts.selection.results_df,
         metrics=artifacts.metrics,
     )
-    mc_percentiles = mc_summary = mc_paths = mc_convergence = None
+    mc_percentiles = mc_summary = mc_paths = mc_convergence = mc_validation = None
     if artifacts.portfolio_inputs.analysis_mode in ("Monte Carlo", "Both"):
         mc_outputs = build_monte_carlo_artifacts(snapshot=snapshot, selection=artifacts.selection)
         mc_percentiles = mc_outputs["percentiles_df"]
         mc_summary = mc_outputs["summary_df"]
         mc_paths = mc_outputs["paths_df"]
         mc_convergence = mc_outputs["convergence_df"]
+        mc_validation = mc_outputs.get("validation_df")
     export_bytes = build_export_bytes_cached(
         portfolio_input_dict=snapshot.portfolio_inputs,
         asset_specs=snapshot_asset_specs(snapshot),
@@ -490,6 +503,7 @@ def build_run_artifacts(
         mc_summary_df=mc_summary,
         mc_paths_df=mc_paths,
         mc_convergence_df=mc_convergence,
+        mc_validation_df=mc_validation,
         scenario_comparison_df=scenario_comparison_df,
     )
     artifacts.benchmark_results_df = benchmark_results_df
@@ -500,5 +514,6 @@ def build_run_artifacts(
     artifacts.mc_summary = mc_summary
     artifacts.mc_paths = mc_paths
     artifacts.mc_convergence = mc_convergence
+    artifacts.mc_validation = mc_validation
     artifacts.export_bytes = export_bytes
     return artifacts

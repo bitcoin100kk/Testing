@@ -5,7 +5,7 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+from .streamlit_compat import st
 
 from .models import HistoricalDataset
 from .utils import _format_percentage_or_na, format_currency, highlight_changes
