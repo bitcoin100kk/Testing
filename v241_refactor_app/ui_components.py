@@ -206,7 +206,11 @@ def render_table(results_df: pd.DataFrame, view_mode: str = "Monthly", *, show_r
             display_df[currency_col] = display_df[currency_col].apply(format_currency)
 
     display_df["Portfolio Total Return (%)"] = display_df["Portfolio Total Return (%)"].apply(_format_percentage_or_na)
-    styled_df = display_df.style.applymap(highlight_changes, subset=["Portfolio Total Return (%)"])
+    styler = display_df.style
+    if hasattr(styler, "map"):
+        styled_df = styler.map(highlight_changes, subset=["Portfolio Total Return (%)"])
+    else:
+        styled_df = styler.applymap(highlight_changes, subset=["Portfolio Total Return (%)"])
     st.dataframe(styled_df, use_container_width=True)
 
 
