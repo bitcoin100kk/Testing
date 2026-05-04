@@ -121,6 +121,13 @@ def _format_benchmark_display_table(comparison_df: pd.DataFrame, view_mode: str)
     return display_df[display_cols]
 
 
+def _style_return_column(display_df: pd.DataFrame):
+    styler = display_df.style
+    if hasattr(styler, "map"):
+        return styler.map(highlight_changes, subset=["Portfolio Total Return (%)"])
+    return styler.applymap(highlight_changes, subset=["Portfolio Total Return (%)"])
+
+
 def render_metric_tabs(metrics: Dict[str, float], *, show_real_values: bool = True) -> None:
     tab1, tab2, tab3 = st.tabs(["Overview", "Risk", "Cashflow"])
     with tab1:
@@ -206,7 +213,7 @@ def render_table(results_df: pd.DataFrame, view_mode: str = "Monthly", *, show_r
             display_df[currency_col] = display_df[currency_col].apply(format_currency)
 
     display_df["Portfolio Total Return (%)"] = display_df["Portfolio Total Return (%)"].apply(_format_percentage_or_na)
-    styled_df = display_df.style.applymap(highlight_changes, subset=["Portfolio Total Return (%)"])
+    styled_df = _style_return_column(display_df)
     st.dataframe(styled_df, use_container_width=True)
 
 

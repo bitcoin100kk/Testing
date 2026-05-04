@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pandas.testing as pdt
 
+from v241_refactor_app import ui_components
 from v241_refactor_app.engine import _apply_withdrawal_trade, maybe_rebalance, run_historical_simulation, simulate_portfolio
 from v241_refactor_app.mc_kernel import build_mc_path_plan, simulate_portfolio_path
 from v241_refactor_app.models import HistoricalSelection
@@ -317,6 +318,76 @@ def test_forward_stress_mode_lowers_mc_median_path(base_assets, base_dataset):
     )
 
     assert float(stressed_percentiles["Median"].iloc[-1]) < float(base_percentiles["Median"].iloc[-1])
+
+
+def test_style_return_column_prefers_styler_map_when_available():
+    calls: list[tuple[str, object, object]] = []
+
+    class _FakeStyler:
+        def map(self, func, subset=None):
+            calls.append(("map", func, subset))
+            return "styled-via-map"
+
+        def applymap(self, func, subset=None):
+            calls.append(("applymap", func, subset))
+            return "styled-via-applymap"
+
+    class _FakeFrame:
+        style = _FakeStyler()
+
+    styled = ui_components._style_return_column(_FakeFrame())
+
+    assert styled == "styled-via-map"
+    assert calls == [("map", ui_components.highlight_changes, ["Portfolio Total Return (%)"])]
+
+
+def test_style_return_column_falls_back_to_applymap_when_map_is_missing():
+    calls: list[tuple[str, object, object]] = []
+
+    class _LegacyStyler:
+        def applymap(self, func, subset=None):
+            calls.append(("applymap", func, subset))
+            return "styled-via-applymap"
+
+    class _LegacyFrame:
+        style = _LegacyStyler()
+
+    styled = ui_components._style_return_column(_LegacyFrame())
+
+    assert styled == "styled-via-applymap"
+    assert calls == [("applymap", ui_components.highlight_changes, ["Portfolio Total Return (%)"])]
+
+
+def test_render_table_emits_styled_dataframe_without_error(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _capture_dataframe(data, **kwargs):
+        captured["data"] = data
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(ui_components.st, "dataframe", _capture_dataframe)
+    results_df = pd.DataFrame(
+        {
+            "Period": pd.to_datetime(["2020-01-31", "2020-02-29"]),
+            "Balance (USD)": [1000.0, 1050.0],
+            "Portfolio Total Return (%)": [5.0, -2.0],
+            "Dividend Yield (USD)": [0.0, 0.0],
+            "Withdrawal (USD)": [0.0, 0.0],
+            "Total Withdrawal + Dividend (USD)": [0.0, 0.0],
+            "Contribution (USD)": [0.0, 0.0],
+            "Dividend Reinvestment (USD)": [0.0, 0.0],
+            "Trading Cost (USD)": [0.0, 0.0],
+            "Fee (USD)": [0.0, 0.0],
+            "Real Balance (USD)": [1000.0, 1040.0],
+            "Rebalanced": [False, False],
+            "Ending Weights": ["{'AAA': 100.0}", "{'AAA': 100.0}"],
+        }
+    )
+
+    ui_components.render_table(results_df, view_mode="Monthly")
+
+    assert captured["kwargs"] == {"use_container_width": True}
+    assert captured["data"].__class__.__name__ == "Styler"
 
 
 def test_bucket_cma_targets_forward_mode_applies_bucket_specific_targets():
